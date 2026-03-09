@@ -25,6 +25,7 @@ while True:
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -261,6 +262,8 @@ class ManipulatorBaseEnv(gym.Env):
                 file_path=self.config.joint_control_param_config
             )
 
+    _REQUIRED_CONTROLLERS = ["joint_trajectory_controller", "cartesian_impedance_controller"]
+
     def wait_until_ready(self):
         """Wait until the robot, gripper, cameras, and sensors are ready."""
         logger.debug("Waiting for robot, gripper, cameras, and sensors to be ready...")
@@ -276,7 +279,41 @@ class ManipulatorBaseEnv(gym.Env):
         for sensor in self.sensors:
             sensor.wait_until_ready(timeout=3)
 
+        self._wait_for_controllers(timeout=10.0)
+
         logger.debug("*Robot, gripper, cameras, and sensors are ready.*")
+
+    def _wait_for_controllers(self, timeout: float = 10.0):
+        """Wait until required controllers are loaded in the controller manager.
+
+        Args:
+            timeout: Maximum time in seconds to wait for controllers.
+
+        Raises:
+            TimeoutError: If the required controllers are not available within the timeout.
+        """
+        if not self.robot.controller_switcher_client.is_server_ready():
+            raise TimeoutError("Controller manager services are not available.")
+
+        t_start = time.time()
+        while time.time() - t_start < timeout:
+            controllers = self.robot.controller_switcher_client.get_controller_list()
+            controller_names = [c.name for c in controllers]
+            missing = [
+                name for name in self._REQUIRED_CONTROLLERS if name not in controller_names
+            ]
+            if not missing:
+                logger.debug("All required controllers are loaded.")
+                return
+            logger.debug(
+                f"Waiting for controllers to be loaded: {missing}"
+            )
+            time.sleep(0.5)
+
+        raise TimeoutError(
+            f"Timed out waiting for controllers: {missing}. "
+            f"Available controllers: {controller_names}"
+        )
 
     def get_obs(self) -> dict:
         """Retrieve the current observation from the robot in LeRobot format and allow backward compatibility."""
@@ -396,16 +433,22 @@ class ManipulatorBaseEnv(gym.Env):
         self.timestep = 0
 
         self.initialize()
+        logger.debug("[DEBUG reset] initialize() done")
 
         self.robot.reset_targets()
+        logger.debug("[DEBUG reset] reset_targets() done")
         self.robot.wait_until_ready()
+        logger.debug("[DEBUG reset] robot.wait_until_ready() done")
         self.switch_to_default_controller()
+        logger.debug("[DEBUG reset] switch_to_default_controller() done")
 
         if self.gripper is not None:
             self.gripper.enable_torque()
+            logger.debug("[DEBUG reset] gripper.enable_torque() done")
 
         for sensor in self.sensors:
             sensor.reset()
+        logger.debug("[DEBUG reset] sensors reset done")
 
         self._previous_rotation_vector = None
         self._previous_target_rotation_vector = None

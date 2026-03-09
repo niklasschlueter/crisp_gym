@@ -52,7 +52,7 @@ def main():
     parser.add_argument(
         "--num-episodes",
         type=int,
-        default=10,
+        default=100,
         help="Number of episodes to record",
     )
     parser.add_argument(
@@ -76,25 +76,25 @@ def main():
     parser.add_argument(
         "--leader-config",
         type=str,
-        default=None,
+        default="right_leader",
         help="Configuration name for the leader robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
     )
     parser.add_argument(
         "--follower-config",
         type=str,
-        default=None,
+        default="left_robot_env",
         help="Configuration name for the follower robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
     )
     parser.add_argument(
         "--follower-namespace",
         type=str,
-        default=None,
+        default="left",
         help="Namespace for the follower robot. This is used to identify the robot in the ROS ecosystem.",
     )
     parser.add_argument(
         "--leader-namespace",
         type=str,
-        default=None,
+        default="right",
         help="Namespace for the leader robot. This is used to identify the robot in the ROS ecosystem.",
     )
     parser.add_argument(
@@ -219,10 +219,14 @@ def main():
         # Prepare environment and leader
         if isinstance(leader, TeleopRobot):
             leader.prepare_for_teleop()
+            logger.debug("[DEBUG] leader.prepare_for_teleop() done")
 
         env.wait_until_ready()
+        logger.debug("[DEBUG] env.wait_until_ready() done")
         env.home(home_config=HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise))
+        logger.debug("[DEBUG] env.home() done")
         env.reset()
+        logger.debug("[DEBUG] env.reset() done")
 
         tasks = list(args.tasks)
 
