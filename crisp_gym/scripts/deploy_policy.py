@@ -85,7 +85,7 @@ def main():
     parser.add_argument(
         "--env-config",
         type=str,
-        default=None,
+        default="left_robot_env",
         help="Configuration name for the follower robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
     )
     parser.add_argument(
@@ -97,7 +97,7 @@ def main():
     parser.add_argument(
         "--env-namespace",
         type=str,
-        default=None,
+        default="left",
         help="Namespace for the follower robot. This is used to identify the robot in the ROS ecosystem.",
     )
     parser.add_argument(
