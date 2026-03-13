@@ -250,11 +250,12 @@ class RecordingManager(ABC):
                     dataset.clear_episode_buffer()
 
                 elif mtype == "PUSH_TO_HUB":
+                    dataset.finalize()
                     logger.info(
                         "Pushing dataset to Hugging Face Hub...",
                     )
                     try:
-                        dataset.push_to_hub(repo_id=self.config.repo_id, private=True)
+                        dataset.push_to_hub(private=True)
                         logger.info("Dataset pushed to Hugging Face Hub successfully.")
                     except Exception as e:
                         logger.error(

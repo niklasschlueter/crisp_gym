@@ -55,7 +55,7 @@ def main():
     parser.add_argument(
         "--push-to-hub",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Whether to push the dataset to the Hugging Face Hub.",
     )
     parser.add_argument(
@@ -213,6 +213,7 @@ def main():
 
         logger.info("Homing robot before starting with recording.")
 
+        env.wait_until_ready()
         env.home()
         env.reset()
 
