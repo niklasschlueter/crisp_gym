@@ -34,7 +34,7 @@ libgl-devel = "*"
 [environments]
 dev = { features = ["py311", "dev"] }
 humble = { features = ["py311", "humble"] }
-# humble-lerobot = { features = ["py311", "humble", "lerobot", "dev"] }  # incompatible: ROS humble needs numpy <2.0, lerobot 0.4.5 needs >=2.0
+humble-lerobot = { features = ["py311", "humble", "lerobot", "dev"] }  # incompatible: ROS humble needs numpy <2.0, lerobot 0.4.5 needs >=2.0
 lerobot = { features = ["py312", "lerobot"] }
 jazzy = { features = ["py312", "jazzy"] }
 jazzy-lerobot = { features = ["py312", "jazzy", "lerobot", "dev"] }
@@ -60,6 +60,9 @@ pudb = ">=2025.1.3, <2026"
 # ============================================================================
 # LeRobot feature
 # ============================================================================
+[feature.lerobot.activation]
+env = { LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH" }
+
 [feature.lerobot.dependencies]
 pynput = "*"
 # rerun-sdk = "=0.22.1"  # conda-forge maxes at 0.23; lerobot 0.4.5 needs >=0.24 (installed via pip)
@@ -73,7 +76,8 @@ numpy = ">=1.26.0"
 # === Newer version ===
 # lerobot = { git = "https://github.com/huggingface/lerobot", rev = "74690e3f56a90b6ea314afbfb3b801a3d842a005", extras = ["smolvla"]}
 # === Local version ===
-lerobot = { path = "../clare_rebuttal/lerobot/", editable = true }
+lerobot = { path = "../clare_rebuttal/lerobot/", editable = true, extras = ["groot"] }
+# lerobot = { path = "../clare_rebuttal/lerobot_lsy/", editable = true }
 
 # ============================================================================
 # ROS2 Humble (Python 3.11)
