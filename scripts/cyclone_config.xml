@@ -9,5 +9,8 @@
     <Discovery>
       <ParticipantIndex>none</ParticipantIndex>
     </Discovery>
+    <Tracing>
+      <Verbosity>severe</Verbosity>
+    </Tracing>
   </Domain>
 </CycloneDDS>
