@@ -50,7 +50,8 @@ def filter_dataset(
     source = LeRobotDataset(repo_id=source_repo_id)
 
     # Remove old local cache for target if it exists so create() starts fresh
-    from lerobot.constants import HF_LEROBOT_HOME
+    # from lerobot.constants import HF_LEROBOT_HOME
+    from lerobot.utils.constants import HF_LEROBOT_HOME
     target_root = HF_LEROBOT_HOME / target_repo_id
     if target_root.exists():
         shutil.rmtree(target_root)
@@ -66,8 +67,9 @@ def filter_dataset(
     )
 
     for ep_idx in range(source.meta.total_episodes):
-        ep_start = source.episode_data_index["from"][ep_idx].item()
-        ep_end = source.episode_data_index["to"][ep_idx].item()
+        ep_meta = source.meta.episodes[ep_idx]
+        ep_start = ep_meta["dataset_from_index"]
+        ep_end = ep_meta["dataset_to_index"]
 
         gripper_action_prev = None
         gripper_state_prev = None
@@ -87,10 +89,9 @@ def filter_dataset(
             gripper_state_prev = gripper_state
 
             # Build frame dict for add_frame
-            task = frame_data["task"]
             frame_dict = {}
             for key, value in frame_data.items():
-                if key in AUTO_KEYS or key == "task":
+                if key in AUTO_KEYS:
                     continue
                 if source.meta.features.get(key, {}).get("dtype") in ("image", "video"):
                     # CHW float32 [0,1] torch tensor -> HWC uint8 numpy
@@ -104,7 +105,7 @@ def filter_dataset(
                             v = v.reshape(expected_shape)
                     frame_dict[key] = v
 
-            target.add_frame(frame_dict, task=task)
+            target.add_frame(frame_dict)
             n_kept += 1
 
         orig_len = ep_end - ep_start
