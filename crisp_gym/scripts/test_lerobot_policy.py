@@ -8,6 +8,7 @@ Usage:
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import time
 
@@ -17,6 +18,35 @@ from lerobot.configs.types import FeatureType
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
 logger = logging.getLogger(__name__)
+
+
+def _spawn_worker(conn, policy_path: str, device: str):
+    """Top-level function for spawn test: loads policy on the given device and reports success/failure.
+
+    Must be a top-level function (not a lambda/closure) to be picklable for spawn.
+    """
+    try:
+        import json as _json
+        from lerobot.policies.factory import get_policy_class
+
+        if os.path.isdir(policy_path):
+            config_path = os.path.join(policy_path, "config.json")
+            with open(config_path) as f:
+                cfg = _json.load(f)
+        else:
+            from huggingface_hub import hf_hub_download
+            with open(hf_hub_download(policy_path, "config.json")) as f:
+                cfg = _json.load(f)
+
+        policy_type = cfg.get("type") or cfg.get("policy_type")
+        policy_cls = get_policy_class(policy_type)
+        policy = policy_cls.from_pretrained(policy_path)
+        policy.to(device).eval()
+        conn.send({"ok": True, "device": device})
+    except Exception as e:
+        conn.send({"ok": False, "error": str(e)})
+    finally:
+        conn.close()
 
 
 def make_dummy_obs(policy, device: str) -> dict[str, torch.Tensor]:
@@ -73,6 +103,8 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--n-warmup", type=int, default=5, help="Warmup iterations.")
     parser.add_argument("--n-bench", type=int, default=10, help="Benchmark iterations.")
+    parser.add_argument("--test-spawn", action=argparse.BooleanOptionalAction, default=True,
+                        help="After inference test, spawn a subprocess to verify no CUDA fork error.")
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
@@ -154,6 +186,26 @@ def main():
     print(f"  avg latency  : {avg_ms:.2f} ms")
     print(f"  min / max    : {min(times)*1000:.2f} / {max(times)*1000:.2f} ms")
     print("\nPASS: policy loaded and inference completed successfully.")
+
+    # ── Step 5: Spawn subprocess test (CUDA fork safety) ──────────
+    if args.test_spawn:
+        print(f"\n[5/5] Spawn subprocess test (CUDA already initialized in main process)...")
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        proc = ctx.Process(
+            target=_spawn_worker,
+            args=(child_conn, args.policy_path, args.device),
+            daemon=True,
+        )
+        proc.start()
+        child_conn.close()  # close child end in parent
+        result = parent_conn.recv()
+        proc.join(timeout=300)
+        if result.get("ok"):
+            print(f"PASS: spawn worker loaded policy on {result['device']} without fork error")
+        else:
+            print(f"FAIL: spawn worker reported error: {result.get('error')}")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
