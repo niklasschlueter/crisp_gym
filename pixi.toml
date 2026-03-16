@@ -37,6 +37,7 @@ humble = { features = ["py311", "humble"] }
 humble-lerobot = { features = ["py311", "humble", "lerobot", "dev"] }  # incompatible: ROS humble needs numpy <2.0, lerobot 0.4.5 needs >=2.0
 lerobot = { features = ["py312", "lerobot"] }
 jazzy = { features = ["py312", "jazzy"] }
+humble-lerobot-groot = { features = ["py311", "humble", "lerobot-groot", "dev"] }
 jazzy-lerobot = { features = ["py312", "jazzy", "lerobot", "dev"] }
 
 # ============================================================================
@@ -77,8 +78,19 @@ numpy = ">=1.26.0"
 # lerobot = { git = "https://github.com/huggingface/lerobot", rev = "74690e3f56a90b6ea314afbfb3b801a3d842a005", extras = ["smolvla"]}
 # === Local version ===
 lerobot = { path = "../clare_rebuttal/lerobot/", editable = true }
-# lerobot = { path = "../clare_rebuttal/lerobot/", editable = true, extras = ["groot"] }
 # lerobot = { path = "../clare_rebuttal/lerobot_lsy/", editable = true }
+
+# ============================================================================
+# LeRobot with GR00T feature
+# ============================================================================
+[feature.lerobot-groot.dependencies]
+pynput = "*"
+
+[feature.lerobot-groot.pypi-options.dependency-overrides]
+numpy = ">=1.26.0"
+
+[feature.lerobot-groot.pypi-dependencies]
+lerobot = { path = "../clare_rebuttal/lerobot/", editable = true, extras = ["groot"] }
 
 # ============================================================================
 # ROS2 Humble (Python 3.11)
