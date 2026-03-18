@@ -44,6 +44,7 @@ class LerobotPolicy(Policy):
         pretrained_path: str,
         env: ManipulatorBaseEnv,
         overrides: dict | None = None,
+        task: str | None = None,
     ):
         """Initialize the policy.
 
@@ -51,9 +52,11 @@ class LerobotPolicy(Policy):
             pretrained_path (str): Path to the pretrained policy model.
             env (ManipulatorBaseEnv): The environment in which the policy will be applied.
             overrides (dict | None): Optional overrides for the policy configuration.
+            task (str | None): Task description for language-conditioned policies.
         """
         self.env = env
         self.overrides = overrides if overrides is not None else {}
+        self.task = task
 
         ctx = multiprocessing.get_context("spawn")
         self.parent_conn, self.child_conn = ctx.Pipe()
@@ -70,6 +73,7 @@ class LerobotPolicy(Policy):
                 "observation_space": observation_space,
                 "env_metadata": env_metadata,
                 "overrides": self.overrides,
+                "task": self.task,
             },
             daemon=True,
         )
@@ -92,6 +96,9 @@ class LerobotPolicy(Policy):
             obs_raw: Observation = self.env.get_obs()
 
             obs_raw["observation.state"] = concatenate_state_features(obs_raw)
+
+            if self.task is not None:
+                obs_raw["task"] = self.task
 
             self.parent_conn.send(obs_raw)
             action: Action = self.parent_conn.recv().squeeze(0).to("cpu").numpy()
@@ -124,6 +131,7 @@ def inference_worker(
     observation_space,
     env_metadata: dict,
     overrides: dict | None = None,
+    task: str | None = None,
 ):  # noqa: ANN001
     """Policy inference process: loads policy on GPU, receives observations via conn, returns actions, and exits on None.
 
@@ -133,6 +141,7 @@ def inference_worker(
         observation_space: The environment's observation space (pre-extracted for spawn compatibility).
         env_metadata (dict): The environment metadata (pre-extracted for spawn compatibility).
         overrides (dict | None): Optional overrides for the policy configuration.
+        task (str | None): Task description for language-conditioned policies.
     """
     setup_logging()
     logger = logging.getLogger(__name__)
@@ -187,9 +196,12 @@ def inference_worker(
 
         warmup_obs_raw = observation_space.sample()
         warmup_obs_raw["observation.state"] = concatenate_state_features(warmup_obs_raw)
+        if task is not None:
+            warmup_obs_raw["task"] = task
         warmup_obs = numpy_obs_to_torch(warmup_obs_raw)
         if USE_LEROBOT_PROCESSORS:
             warmup_obs = preprocessor(warmup_obs)
+            warmup_obs.pop("action", None)
 
         logger.info("[Inference] Warming up policy...")
         elapsed_list = []
@@ -232,6 +244,7 @@ def inference_worker(
                 obs = numpy_obs_to_torch(obs_raw)
                 if USE_LEROBOT_PROCESSORS:
                     obs = preprocessor(obs)
+                    obs.pop("action", None)
                 action = policy.select_action(obs)
                 if USE_LEROBOT_PROCESSORS:
                     action = postprocessor(action)

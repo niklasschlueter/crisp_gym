@@ -106,6 +106,12 @@ def main():
         default=False,
         help="Whether to evaluate the performance of the model after each episode.",
     )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="put the bowl on the plate",
+        help="Task description for language-conditioned policies (e.g. 'Pick up the lego block.').",
+    )
 
     args = parser.parse_args()
     logger = logging.getLogger(__name__)
@@ -209,6 +215,7 @@ def main():
             name_or_config_name=args.policy_config,
             pretrained_path=args.path,
             env=env,
+            task=args.task,
         )
 
         logger.info("Homing robot before starting with recording.")
@@ -242,7 +249,7 @@ def main():
 
                     recording_manager.record_episode(
                         data_fn=policy.make_data_fn(),
-                        task="Pick up the lego block.",
+                        task=args.task,
                         on_start=on_start,
                         on_end=on_end,
                     )
