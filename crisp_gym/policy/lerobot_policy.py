@@ -45,6 +45,7 @@ class LerobotPolicy(Policy):
         env: ManipulatorBaseEnv,
         overrides: dict | None = None,
         task: str | None = None,
+        peft_path: str | None = None,
     ):
         """Initialize the policy.
 
@@ -74,6 +75,7 @@ class LerobotPolicy(Policy):
                 "env_metadata": env_metadata,
                 "overrides": self.overrides,
                 "task": self.task,
+                "peft_path": peft_path,
             },
             daemon=True,
         )
@@ -132,6 +134,7 @@ def inference_worker(
     env_metadata: dict,
     overrides: dict | None = None,
     task: str | None = None,
+    peft_path: str | None = None,
 ):  # noqa: ANN001
     """Policy inference process: loads policy on GPU, receives observations via conn, returns actions, and exits on None.
 
@@ -178,6 +181,14 @@ def inference_worker(
         logger.info("[Inference] Loading policy...")
         policy_cls = get_policy_class(train_config.policy.type)
         policy = policy_cls.from_pretrained(pretrained_path)
+
+        if peft_path is not None:
+            from peft import PeftConfig, PeftModel
+
+            logger.info(f"[Inference] Loading PEFT adapter from {peft_path}...")
+            peft_config = PeftConfig.from_pretrained(peft_path)
+            policy = PeftModel.from_pretrained(policy, peft_path, config=peft_config)
+            logger.info("[Inference] PEFT adapter applied successfully.")
 
         for override_key, override_value in (overrides or {}).items():
             logger.warning(

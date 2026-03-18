@@ -112,6 +112,13 @@ def main():
         default="put the bowl on the plate",
         help="Task description for language-conditioned policies (e.g. 'Pick up the lego block.').",
     )
+    parser.add_argument(
+        "--peft-path",
+        type=str,
+        default=None,
+        help="Path to a PEFT adapter (local directory or HuggingFace repo ID). "
+        "If provided, the base model from --path is loaded first, then the adapter is applied.",
+    )
 
     args = parser.parse_args()
     logger = logging.getLogger(__name__)
@@ -216,6 +223,7 @@ def main():
             pretrained_path=args.path,
             env=env,
             task=args.task,
+            peft_path=args.peft_path,
         )
 
         logger.info("Homing robot before starting with recording.")

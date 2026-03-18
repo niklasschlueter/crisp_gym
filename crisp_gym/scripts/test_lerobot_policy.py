@@ -20,7 +20,7 @@ from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 logger = logging.getLogger(__name__)
 
 
-def _spawn_worker(conn, policy_path: str, device: str):
+def _spawn_worker(conn, policy_path: str, device: str, peft_path: str | None = None):
     """Top-level function for spawn test: loads policy on the given device and reports success/failure.
 
     Must be a top-level function (not a lambda/closure) to be picklable for spawn.
@@ -41,6 +41,13 @@ def _spawn_worker(conn, policy_path: str, device: str):
         policy_type = cfg.get("type") or cfg.get("policy_type")
         policy_cls = get_policy_class(policy_type)
         policy = policy_cls.from_pretrained(policy_path)
+
+        if peft_path is not None:
+            from peft import PeftConfig, PeftModel
+
+            peft_config = PeftConfig.from_pretrained(peft_path)
+            policy = PeftModel.from_pretrained(policy, peft_path, config=peft_config)
+
         policy.to(device).eval()
         conn.send({"ok": True, "device": device})
     except Exception as e:
@@ -105,12 +112,15 @@ def main():
     parser.add_argument("--n-bench", type=int, default=10, help="Benchmark iterations.")
     parser.add_argument("--test-spawn", action=argparse.BooleanOptionalAction, default=True,
                         help="After inference test, spawn a subprocess to verify no CUDA fork error.")
+    parser.add_argument("--peft-path", default=None,
+                        help="Path or HF repo ID of a PEFT adapter to apply on top of the base policy.")
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
     print("LeRobot Policy Integration Test")
     print(f"{'='*60}")
     print(f"  policy_path : {args.policy_path}")
+    print(f"  peft_path   : {args.peft_path}")
     print(f"  device      : {args.device}")
 
     # ── Step 1: Load train config ──────────────────────────────────
@@ -141,6 +151,15 @@ def main():
     print("\n[2/4] Loading policy weights...")
     policy_cls = get_policy_class(policy_type)
     policy = policy_cls.from_pretrained(args.policy_path)
+
+    if args.peft_path is not None:
+        from peft import PeftConfig, PeftModel
+
+        print(f"  Loading PEFT adapter from {args.peft_path}...")
+        peft_config = PeftConfig.from_pretrained(args.peft_path)
+        policy = PeftModel.from_pretrained(policy, args.peft_path, config=peft_config)
+        print("  PEFT adapter applied.")
+
     policy.to(args.device).eval()
     policy.reset()
 
@@ -194,7 +213,7 @@ def main():
         parent_conn, child_conn = ctx.Pipe(duplex=False)
         proc = ctx.Process(
             target=_spawn_worker,
-            args=(child_conn, args.policy_path, args.device),
+            args=(child_conn, args.policy_path, args.device, args.peft_path),
             daemon=True,
         )
         proc.start()

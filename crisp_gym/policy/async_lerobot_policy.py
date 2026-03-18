@@ -27,7 +27,7 @@ from crisp_gym.util.lerobot_features import concatenate_state_features, numpy_ob
 class AsyncLerobotPolicy(Policy):
     """Asynchronous Lerobot Policy."""
 
-    def __init__(self, pretrained_path: str, env: ManipulatorBaseEnv):
+    def __init__(self, pretrained_path: str, env: ManipulatorBaseEnv, **kwargs):
         """Initialize the policy."""
         self.parent_conn, self.child_conn = Pipe()
         self.env = env
