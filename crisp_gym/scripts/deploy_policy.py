@@ -213,6 +213,7 @@ def main():
             num_episodes=args.num_episodes,
             fps=args.fps,
             resume=args.resume,
+            push_to_hub=args.push_to_hub,
         )
         recording_manager.wait_until_ready()
 
