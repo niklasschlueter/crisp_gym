@@ -108,6 +108,7 @@ class LerobotPolicy(Policy):
 
             try:
                 self.env.step(action, block=False)
+                # pass
             except Exception as e:
                 logger.exception(f"Error during environment step: {e}")
 
@@ -181,6 +182,7 @@ def inference_worker(
         logger.info("[Inference] Loading policy...")
         policy_cls = get_policy_class(train_config.policy.type)
         policy = policy_cls.from_pretrained(pretrained_path)
+        policy_name = policy.name
 
         if peft_path is not None:
             from peft import PeftConfig, PeftModel
@@ -196,14 +198,15 @@ def inference_worker(
             )
             setattr(policy.config, override_key, override_value)
 
-        logger.info(
-            f"[Inference] Loaded {policy.name} policy with {pretrained_path} on device {device}."
-        )
+        # logger.info(
+        #     f"[Inference] Loaded {policy.name} policy with {pretrained_path} on device {device}."
+        # )
         policy.reset()
         policy.to(device).eval()
 
         if USE_LEROBOT_PROCESSORS:
-            preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy.config, pretrained_path=pretrained_path)
+            norm_path = peft_path if peft_path is not None else pretrained_path
+            preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy.config, pretrained_path=norm_path)
 
         warmup_obs_raw = observation_space.sample()
         warmup_obs_raw["observation.state"] = concatenate_state_features(warmup_obs_raw)
