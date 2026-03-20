@@ -98,7 +98,6 @@ def filter_dataset(
                     frame_dict[key] = (value.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 else:
                     v = value.numpy() if hasattr(value, "numpy") else value
-                    # Ensure arrays match expected shape (e.g. scalar -> (1,))
                     if isinstance(v, np.ndarray):
                         expected_shape = features.get(key, {}).get("shape")
                         if expected_shape is not None and v.shape != tuple(expected_shape):
@@ -125,6 +124,8 @@ def filter_dataset(
         else:
             target.clear_episode_buffer()
             print(f"Episode {ep_idx}: all {orig_len} frames filtered out, skipping")
+
+    target.finalize()
 
     print(f"\nFiltered dataset saved locally as '{target_repo_id}'")
     print(f"  Episodes: {source.meta.total_episodes} -> {target.meta.total_episodes}")
