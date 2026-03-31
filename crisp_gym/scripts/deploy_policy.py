@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import logging
+import threading
 from pathlib import Path
 
 import crisp_gym  # noqa: F401
@@ -107,10 +108,22 @@ def main():
         help="Whether to evaluate the performance of the model after each episode.",
     )
     parser.add_argument(
-        "--task",
+        "--tasks",
         type=str,
-        default="put the bowl on the plate",
-        help="Task description for language-conditioned policies (e.g. 'Pick up the lego block.').",
+        nargs="+",
+        default=["put the bowl on the plate"],
+        help="Task descriptions for language-conditioned policies. "
+        "Multiple tasks can be provided for timed switching "
+        "(e.g. --tasks 'put the lego into the drawer' 'close the drawer').",
+    )
+    parser.add_argument(
+        "--switch-at",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Times (in seconds) at which to switch to the next task. "
+        "Number of values must be len(tasks) - 1. "
+        "(e.g. --switch-at 2.0 means switch to the 2nd task at t=2s).",
     )
     parser.add_argument(
         "--peft-path",
@@ -119,10 +132,27 @@ def main():
         help="Path to a PEFT adapter (local directory or HuggingFace repo ID). "
         "If provided, the base model from --path is loaded first, then the adapter is applied.",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable inference profiling (per-adapter/discriminator timing and VRAM usage). "
+        "Results saved to ./crisp_gym/clare_profile/ as JSON and CSV.",
+    )
 
     args = parser.parse_args()
     logger = logging.getLogger(__name__)
     setup_logging(level=args.log_level)
+
+    # Validate --switch-at against --tasks
+    if args.switch_at is not None:
+        if len(args.switch_at) != len(args.tasks) - 1:
+            parser.error(
+                f"--switch-at requires exactly {len(args.tasks) - 1} value(s) "
+                f"for {len(args.tasks)} tasks, got {len(args.switch_at)}"
+            )
+    elif len(args.tasks) > 1:
+        parser.error("--switch-at is required when multiple --tasks are provided")
 
     logger.info("-" * 40)
     logger.info("Arguments:")
@@ -223,8 +253,10 @@ def main():
             name_or_config_name=args.policy_config,
             pretrained_path=args.path,
             env=env,
-            task=args.task,
+            task=args.tasks[0],
             peft_path=args.peft_path,
+            profile=args.profile,
+            repo_id=args.repo_id,
         )
 
         logger.info("Homing robot before starting with recording.")
@@ -233,14 +265,35 @@ def main():
         env.home()
         env.reset()
 
+        task_switch_timers = []
+
+        def schedule_task_switches():
+            """Schedule timed task switches for the current episode."""
+            for timer in task_switch_timers:
+                timer.cancel()
+            task_switch_timers.clear()
+
+            policy.set_task(args.tasks[0])
+
+            if args.switch_at is not None:
+                for delay, task in zip(args.switch_at, args.tasks[1:]):
+                    timer = threading.Timer(delay, policy.set_task, args=(task,))
+                    timer.daemon = True
+                    timer.start()
+                    task_switch_timers.append(timer)
+
         def on_start():
             """Hook function to be called when starting a new episode."""
             env.reset()
             policy.reset()
+            schedule_task_switches()
             evaluator.start_timer()
 
         def on_end():
             """Hook function to be called when stopping the recording."""
+            for timer in task_switch_timers:
+                timer.cancel()
+            task_switch_timers.clear()
             env.robot.reset_targets()
             env.robot.home(blocking=False)
             env.gripper.open()
@@ -258,7 +311,7 @@ def main():
 
                     recording_manager.record_episode(
                         data_fn=policy.make_data_fn(),
-                        task=args.task,
+                        task=args.tasks[0],
                         on_start=on_start,
                         on_end=on_end,
                     )

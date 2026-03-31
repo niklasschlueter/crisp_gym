@@ -1,8 +1,12 @@
 """Interface for a Policy interacting in CRISP."""
 
+import csv
+import datetime
 import json
 import logging
 import multiprocessing
+import statistics
+import time
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Callable, Tuple
@@ -46,6 +50,8 @@ class LerobotPolicy(Policy):
         overrides: dict | None = None,
         task: str | None = None,
         peft_path: str | None = None,
+        profile: bool = False,
+        repo_id: str | None = None,
     ):
         """Initialize the policy.
 
@@ -76,6 +82,8 @@ class LerobotPolicy(Policy):
                 "overrides": self.overrides,
                 "task": self.task,
                 "peft_path": peft_path,
+                "profile": profile,
+                "repo_id": repo_id,
             },
             daemon=True,
         )
@@ -116,6 +124,11 @@ class LerobotPolicy(Policy):
 
         return _fn
 
+    def set_task(self, task: str):
+        """Update the language instruction for subsequent inference steps."""
+        logger.info(f"[Policy] Task changed to: '{task}'")
+        self.task = task
+
     @override
     def reset(self):
         """Reset the policy state."""
@@ -128,6 +141,212 @@ class LerobotPolicy(Policy):
         self.inf_proc.join()
 
 
+def _save_profile_data(logger, step_profiles, device, adapter_vram=None, disc_vram=None,
+                       backbone_vram_mb=0.0, total_param_vram_mb=0.0, repo_id=None):
+    """Save profiling data to JSON, CSV, and Markdown in ./outputs/clare_profile/."""
+    if not step_profiles:
+        return
+    if adapter_vram is None:
+        adapter_vram = {}
+    if disc_vram is None:
+        disc_vram = {}
+
+    profile_dir = Path("outputs/clare_profile")
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_prefix = repo_id.replace("/", "_") if repo_id else "profile"
+
+    n = len(step_profiles)
+
+    # Build summary
+    summary = {}
+    timing_keys = set()
+    for s in step_profiles:
+        for k in s:
+            if k.endswith("_ms"):
+                timing_keys.add(k)
+    for key in sorted(timing_keys):
+        vals = [s[key] for s in step_profiles if key in s and s[key] is not None]
+        if vals:
+            summary[key] = {
+                "mean": statistics.mean(vals),
+                "std": statistics.stdev(vals) if len(vals) > 1 else 0.0,
+                "p50": statistics.median(vals),
+                "p95": sorted(vals)[int(len(vals) * 0.95)] if len(vals) > 1 else vals[0],
+                "min": min(vals),
+                "max": max(vals),
+                "count": len(vals),
+            }
+
+    # VRAM info (static, from first step that has it)
+    vram_summary = {}
+    vram_keys = set()
+    for s in step_profiles:
+        for k in s:
+            if k.endswith("_vram_mb"):
+                vram_keys.add(k)
+    for key in sorted(vram_keys):
+        for s in step_profiles:
+            if key in s and s[key] is not None:
+                vram_summary[key] = s[key]
+                break
+
+    # Process-level VRAM
+    process_vram = {}
+    if device.type == "cuda":
+        process_vram = {
+            "allocated_mb": torch.cuda.memory_allocated(device) / 1024**2,
+            "max_allocated_mb": torch.cuda.max_memory_allocated(device) / 1024**2,
+        }
+
+    # Sanitize step_profiles for JSON (convert non-serializable types)
+    sanitized_steps = []
+    for s in step_profiles:
+        sanitized = {}
+        for k, v in s.items():
+            if isinstance(v, (list, tuple)):
+                sanitized[k] = [int(x) if isinstance(x, (int, np.integer)) else x for x in v]
+            elif isinstance(v, (np.integer,)):
+                sanitized[k] = int(v)
+            elif isinstance(v, (np.floating,)):
+                sanitized[k] = float(v)
+            else:
+                sanitized[k] = v
+        sanitized_steps.append(sanitized)
+
+    # Write JSON
+    json_path = profile_dir / f"{file_prefix}_{timestamp}.json"
+    json_data = {
+        "num_steps": n,
+        "steps": sanitized_steps,
+        "summary": summary,
+        "vram_per_component": vram_summary,
+        "vram_adapters": adapter_vram,
+        "vram_discriminators": disc_vram,
+        "vram_backbone_mb": backbone_vram_mb,
+        "vram_total_model_mb": total_param_vram_mb,
+        "vram_process": process_vram,
+    }
+    with open(json_path, "w") as f:
+        json.dump(json_data, f, indent=2)
+    logger.info(f"[Profile] JSON saved to {json_path}")
+
+    # Write CSV
+    csv_path = profile_dir / f"{file_prefix}_{timestamp}.csv"
+    all_keys = set()
+    for s in sanitized_steps:
+        all_keys.update(k for k in s.keys() if not isinstance(s[k], (list, dict)))
+    fieldnames = sorted(all_keys, key=lambda k: (k != "step", k != "select_action_ms", k))
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for s in sanitized_steps:
+            row = {k: v for k, v in s.items() if not isinstance(v, (list, dict))}
+            writer.writerow(row)
+    logger.info(f"[Profile] CSV saved to {csv_path}")
+
+    # Write Markdown report
+    md_path = profile_dir / f"{file_prefix}_{timestamp}.md"
+    aggregate_keys = ["select_action_ms", "backbone_ms",
+                      "all_discriminators_total_ms", "all_discriminators_mean_ms",
+                      "all_adapters_total_ms", "all_adapters_mean_ms"]
+    md_lines = [
+        f"# CLARE Inference Profile Report",
+        f"**Repo ID:** {repo_id or 'N/A'} | **Date:** {date_str} | **Steps:** {n}",
+        "",
+        "## Timing Summary",
+        "| Metric | Mean (ms) | Std | P50 | P95 | Min | Max |",
+        "|--------|-----------|-----|-----|-----|-----|-----|",
+    ]
+    for key in aggregate_keys:
+        if key in summary:
+            s = summary[key]
+            md_lines.append(
+                f"| {key} | {s['mean']:.2f} | {s['std']:.2f} | {s['p50']:.2f} | {s['p95']:.2f} | {s['min']:.2f} | {s['max']:.2f} |"
+            )
+
+    per_layer = {k: v for k, v in summary.items() if k not in aggregate_keys}
+    if per_layer:
+        md_lines += [
+            "",
+            "## Per-Layer Detail",
+            "| Metric | Mean (ms) | Std | Steps |",
+            "|--------|-----------|-----|-------|",
+        ]
+        for key, s in per_layer.items():
+            md_lines.append(f"| {key} | {s['mean']:.2f} | {s['std']:.2f} | {s['count']} |")
+
+    md_lines += ["", "## VRAM (Model Params)", "| Component | MB |", "|-----------|---:|"]
+    if total_param_vram_mb > 0:
+        md_lines.append(f"| **Total model** | {total_param_vram_mb:.2f} |")
+        md_lines.append(f"| **Backbone** | {backbone_vram_mb:.2f} |")
+        md_lines.append(f"| **All adapters** | {sum(adapter_vram.values()):.2f} |")
+        md_lines.append(f"| **All discriminators** | {sum(disc_vram.values()):.2f} |")
+    for key, val in adapter_vram.items():
+        md_lines.append(f"| {key} | {val:.2f} |")
+    for key, val in disc_vram.items():
+        md_lines.append(f"| {key} | {val:.2f} |")
+    for key, val in vram_summary.items():
+        md_lines.append(f"| {key} | {val:.2f} |")
+
+    if process_vram:
+        md_lines += [
+            "",
+            "## Process VRAM",
+            "| Metric | MB |",
+            "|-----------|---:|",
+            f"| Allocated | {process_vram['allocated_mb']:.1f} |",
+            f"| Max allocated | {process_vram['max_allocated_mb']:.1f} |",
+        ]
+
+    md_lines += [
+        "",
+        "---",
+        f"*Files: [{file_prefix}_{timestamp}.json]({file_prefix}_{timestamp}.json) | [{file_prefix}_{timestamp}.csv]({file_prefix}_{timestamp}.csv)*",
+    ]
+    with open(md_path, "w") as f:
+        f.write("\n".join(md_lines) + "\n")
+    logger.info(f"[Profile] Markdown report saved to {md_path}")
+
+    # Log summary — highlight aggregate metrics first
+    logger.info(f"[Profile] === Timing Summary ({n} steps) ===")
+    for key in aggregate_keys:
+        if key in summary:
+            stats = summary[key]
+            logger.info(
+                f"[Profile] {key}: mean={stats['mean']:.2f}, std={stats['std']:.2f}, "
+                f"p50={stats['p50']:.2f}, p95={stats['p95']:.2f}, "
+                f"min={stats['min']:.2f}, max={stats['max']:.2f}"
+            )
+
+    logger.info("[Profile] === Per-Layer Detail ===")
+    for key, stats in summary.items():
+        if key not in aggregate_keys:
+            logger.info(
+                f"[Profile] {key}: mean={stats['mean']:.2f}, std={stats['std']:.2f} "
+                f"(over {stats['count']} steps)"
+            )
+
+    logger.info("[Profile] === VRAM (model params) ===")
+    if total_param_vram_mb > 0:
+        logger.info(f"[Profile] Total model: {total_param_vram_mb:.2f}MB")
+        logger.info(f"[Profile] Backbone: {backbone_vram_mb:.2f}MB")
+        logger.info(f"[Profile] All adapters: {sum(adapter_vram.values()):.2f}MB")
+        logger.info(f"[Profile] All discriminators: {sum(disc_vram.values()):.2f}MB")
+    for key, val in adapter_vram.items():
+        logger.info(f"[Profile]   {key}: {val:.2f}MB")
+    for key, val in disc_vram.items():
+        logger.info(f"[Profile]   {key}: {val:.2f}MB")
+    for key, val in vram_summary.items():
+        logger.info(f"[Profile]   {key}: {val:.2f}MB")
+    if process_vram:
+        logger.info(
+            f"[Profile] Process VRAM: allocated={process_vram['allocated_mb']:.1f}MB, "
+            f"max_allocated={process_vram['max_allocated_mb']:.1f}MB"
+        )
+
+
 def inference_worker(
     conn: Connection,
     pretrained_path: str,
@@ -136,6 +355,8 @@ def inference_worker(
     overrides: dict | None = None,
     task: str | None = None,
     peft_path: str | None = None,
+    profile: bool = False,
+    repo_id: str | None = None,
 ):  # noqa: ANN001
     """Policy inference process: loads policy on GPU, receives observations via conn, returns actions, and exits on None.
 
@@ -192,11 +413,15 @@ def inference_worker(
             policy = PeftModel.from_pretrained(policy, peft_path, config=peft_config)
             logger.info("[Inference] PEFT adapter applied successfully.")
 
+        # After PEFT wrapping, policy.config is PeftConfig, not the model config
+        model_config = policy.get_base_model().config if peft_path is not None else policy.config
         for override_key, override_value in (overrides or {}).items():
             logger.warning(
-                f"[Inference] Overriding policy config: {override_key} = {getattr(policy.config, override_key)} -> {override_value}"
+                f"[Inference] Overriding policy config: {override_key} = {getattr(model_config, override_key)} -> {override_value}"
             )
-            setattr(policy.config, override_key, override_value)
+            setattr(model_config, override_key, override_value)
+
+        logger.info(f"[Inference] num_inference_steps = {model_config.num_inference_steps}")
 
         # logger.info(
         #     f"[Inference] Loaded {policy.name} policy with {pretrained_path} on device {device}."
@@ -207,6 +432,13 @@ def inference_worker(
         if USE_LEROBOT_PROCESSORS:
             norm_path = peft_path if peft_path is not None else pretrained_path
             preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy.config, pretrained_path=norm_path)
+
+
+            # logger.info(f"[Inference] Normalization stats loaded from: {norm_path}")
+            # for name, pipeline in [("preprocessor", preprocessor), ("postprocessor", postprocessor)]:
+            #     for step in pipeline.steps:
+            #         if hasattr(step, "stats") and step.stats:
+            #             logger.info(f"[Inference] {name} step {step.__class__.__name__} stats: {step.stats}")
 
         warmup_obs_raw = observation_space.sample()
         warmup_obs_raw["observation.state"] = concatenate_state_features(warmup_obs_raw)
@@ -220,8 +452,6 @@ def inference_worker(
         logger.info("[Inference] Warming up policy...")
         elapsed_list = []
         with torch.inference_mode():
-            import time
-
             for _ in range(100):
                 start = time.time()
                 _ = policy.select_action(warmup_obs)
@@ -242,6 +472,62 @@ def inference_worker(
 
         logger.info("[Inference] Warm-up complete")
 
+        # Enable CLARE profiling after warmup
+        clare_layers = []
+        adapter_vram = {}  # {layer_i/adapter_j: vram_mb}
+        disc_vram = {}
+        backbone_vram_mb = 0.0
+        total_param_vram_mb = 0.0
+        if profile and peft_path is not None:
+            # Step 1: Discover CLARE layers
+            try:
+                from peft.tuners.clare.layer import CLARELayer
+                clare_layers = [m for m in policy.modules() if isinstance(m, CLARELayer)]
+            except ImportError:
+                logger.warning("[Profile] Could not import CLARELayer")
+            logger.info(f"[Profile] Found {len(clare_layers)} CLARELayers via module scan")
+
+            # Step 2: Enable profiling on each layer
+            for layer in clare_layers:
+                layer._profile_inference = True
+
+            # Step 3: Compute VRAM breakdown
+            if clare_layers:
+                for i, layer in enumerate(clare_layers):
+                    adapter_name = layer.adapter_name
+                    for j, adapter in enumerate(layer.clare_func_adapters[adapter_name]):
+                        param_bytes = sum(p.nelement() * p.element_size() for p in adapter.parameters())
+                        vram_mb = param_bytes / (1024 ** 2)
+                        adapter_vram[f"layer_{i}/adapter_{j}_vram_mb"] = vram_mb
+                        logger.info(f"[Profile] layer_{i}/adapter_{j} VRAM: {vram_mb:.2f}MB")
+
+                    for j, disc in enumerate(layer.clare_discriminators[adapter_name]):
+                        param_bytes = sum(p.nelement() * p.element_size() for p in disc.parameters())
+                        vram_mb = param_bytes / (1024 ** 2)
+                        disc_vram[f"layer_{i}/discriminator_{j}_vram_mb"] = vram_mb
+                        logger.info(f"[Profile] layer_{i}/discriminator_{j} VRAM: {vram_mb:.2f}MB")
+
+                total_param_bytes = sum(p.nelement() * p.element_size() for p in policy.parameters())
+                total_param_vram_mb = total_param_bytes / (1024 ** 2)
+                total_adapter_vram_mb = sum(adapter_vram.values())
+                total_disc_vram_mb = sum(disc_vram.values())
+                backbone_vram_mb = total_param_vram_mb - total_adapter_vram_mb - total_disc_vram_mb
+
+                logger.info(f"[Profile] Total model VRAM: {total_param_vram_mb:.2f}MB")
+                logger.info(f"[Profile] Backbone VRAM: {backbone_vram_mb:.2f}MB")
+                logger.info(f"[Profile] Total adapter VRAM: {total_adapter_vram_mb:.2f}MB")
+                logger.info(f"[Profile] Total discriminator VRAM: {total_disc_vram_mb:.2f}MB")
+
+        if profile and device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+            logger.info(
+                f"[Profile] VRAM after warmup: "
+                f"allocated={torch.cuda.memory_allocated(device) / 1024**2:.1f}MB"
+            )
+
+        step_profiles = []
+        step_count = 0
+
         while True:
             obs_raw = conn.recv()
             if obs_raw is None:
@@ -259,12 +545,74 @@ def inference_worker(
                 if USE_LEROBOT_PROCESSORS:
                     obs = preprocessor(obs)
                     obs.pop("action", None)
+
+                if profile:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    t0 = time.perf_counter()
+
                 action = policy.select_action(obs)
+
+                if profile:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+                    step_data = {"step": step_count, "select_action_ms": elapsed_ms}
+                    all_disc_times = []
+                    all_adapter_times = []
+                    for i, layer in enumerate(clare_layers):
+                        info = layer.info_dicts
+                        if not info:
+                            continue
+                        prefix = f"layer_{i}"
+                        if "top_1_idx_list" in info:
+                            step_data[f"{prefix}/routing"] = info["top_1_idx_list"]
+                        if "adapter_timing" in info:
+                            for aid, atinfo in info["adapter_timing"].items():
+                                t = atinfo.get("time_ms")
+                                step_data[f"{prefix}/adapter_{aid}_ms"] = t
+                                if t is not None:
+                                    all_adapter_times.append(t)
+                        for key in info:
+                            if key.startswith("discriminator_"):
+                                d_info = info[key]
+                                if "time_ms" in d_info:
+                                    t = d_info["time_ms"]
+                                    step_data[f"{prefix}/{key}_ms"] = t
+                                    all_disc_times.append(t)
+                                if "loaded_vram_mb" in d_info:
+                                    step_data[f"{prefix}/{key}_vram_mb"] = d_info["loaded_vram_mb"]
+                    # Aggregate timing across all layers
+                    disc_total = sum(all_disc_times) if all_disc_times else 0.0
+                    adapter_total = sum(all_adapter_times) if all_adapter_times else 0.0
+                    if all_disc_times:
+                        step_data["all_discriminators_total_ms"] = disc_total
+                        step_data["all_discriminators_mean_ms"] = disc_total / len(all_disc_times)
+                    if all_adapter_times:
+                        step_data["all_adapters_total_ms"] = adapter_total
+                        step_data["all_adapters_mean_ms"] = adapter_total / len(all_adapter_times)
+                    # Backbone time = select_action - discriminators - adapters
+                    step_data["backbone_ms"] = elapsed_ms - disc_total - adapter_total
+                    step_profiles.append(step_data)
+                    step_count += 1
+
                 if USE_LEROBOT_PROCESSORS:
                     action = postprocessor(action)
 
             logger.debug(f"[Inference] Computed action: {action}")
             conn.send(action)
+
+        # Save profiling data on shutdown
+        if profile and step_profiles:
+            _save_profile_data(
+                logger, step_profiles, device,
+                adapter_vram=adapter_vram,
+                disc_vram=disc_vram,
+                backbone_vram_mb=backbone_vram_mb,
+                total_param_vram_mb=total_param_vram_mb,
+                repo_id=repo_id,
+            )
     except Exception as e:
         logger.exception(f"[Inference] Exception in inference worker: {e}")
 

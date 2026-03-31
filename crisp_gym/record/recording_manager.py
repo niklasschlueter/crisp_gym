@@ -255,7 +255,7 @@ class RecordingManager(ABC):
                         "Pushing dataset to Hugging Face Hub...",
                     )
                     try:
-                        dataset.push_to_hub(private=True)
+                        dataset.push_to_hub(private=False)
                         logger.info("Dataset pushed to Hugging Face Hub successfully.")
                     except Exception as e:
                         logger.error(

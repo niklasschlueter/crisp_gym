@@ -124,7 +124,8 @@ numpy = ">=1.26.0"
 [feature.lerobot-dit.pypi-dependencies]
 lerobot = { path = "../clare_rebuttal/lerobot/", editable = true }
 transformers = "==4.57.1"
-peft = "==0.18.1"
+peft = { path = "../clare_rebuttal/peft/", editable = true }
+# peft = "==0.18.1"
 
 # ============================================================================
 # ROS2 Humble (Python 3.11)

@@ -1,0 +1,3 @@
+name: "lerobot_policy"
+overrides:
+  num_inference_steps: 20  # default is 100
