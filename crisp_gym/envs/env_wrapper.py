@@ -10,6 +10,7 @@ The module includes:
     - stack_gym_space: Helper function to repeat/stack Gym spaces
 """
 
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
@@ -42,7 +43,9 @@ def stack_gym_space(space: gym.Space, repeat: int) -> gym.Space:
             dtype=dtype,
         )
     elif isinstance(space, gym.spaces.Dict):
-        return gym.spaces.Dict({k: stack_gym_space(v, repeat) for k, v in space.spaces.items()})
+        return gym.spaces.Dict(
+            {k: stack_gym_space(v, repeat) for k, v in space.spaces.items()}
+        )
     else:
         raise ValueError(f"Space {space} is not supported.")
 
@@ -71,7 +74,9 @@ class WindowWrapper(gym.Wrapper):
         super().__init__(env)
         self.window_size = window_size
         self.window = []
-        self.observation_space = stack_gym_space(self.env.observation_space, self.window_size)
+        self.observation_space = stack_gym_space(
+            self.env.observation_space, self.window_size
+        )
 
     def step(
         self, action: NDArray[np.float32], **kwargs: Any
@@ -94,7 +99,8 @@ class WindowWrapper(gym.Wrapper):
         self.window.append(obs)
         self.window = self.window[-self.window_size :]
         obs = {
-            key: np.stack([frame[key] for frame in self.window]) for key in self.window[0].keys()
+            key: np.stack([frame[key] for frame in self.window])
+            for key in self.window[0].keys()
         }
         return obs, float(reward), terminated, truncated, info
 
@@ -115,7 +121,8 @@ class WindowWrapper(gym.Wrapper):
         obs, info = self.env.reset(seed=seed, options=options)
         self.window = [obs] * self.window_size
         obs = {
-            key: np.stack([frame[key] for frame in self.window]) for key in self.window[0].keys()
+            key: np.stack([frame[key] for frame in self.window])
+            for key in self.window[0].keys()
         }
         return obs, info
 
@@ -186,7 +193,9 @@ class RecedingHorizon(gym.Wrapper):
         assert action.shape[0] >= self.horizon_length
 
         for i in range(self.horizon_length):
-            obs, reward, terminated, truncated, info = self.env.step(action[i], **kwargs)
+            obs, reward, terminated, truncated, info = self.env.step(
+                action[i], **kwargs
+            )
             rewards.append(reward)
             if terminated or truncated:
                 break
@@ -212,7 +221,7 @@ class RecedingHorizon(gym.Wrapper):
 
     def close(self) -> None:
         """Clean up the environment's resources."""
-        if rclpy.ok():
+        if rclpy.ok():  # pyright: ignore[reportPrivateImportUsage]
             rclpy.shutdown()
         self.env.close()
 
@@ -226,3 +235,264 @@ class RecedingHorizon(gym.Wrapper):
             Any: The value of the requested attribute.
         """
         return getattr(self.env, name)
+
+
+class ActionTimeStampWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        time_stamp = time.time()
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        info["action_t"] = time_stamp
+        return observation, float(reward), terminated, truncated, info
+
+
+class NoRotationNoGripperActionWrapper(gym.ActionWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = gym.spaces.Box(-np.inf, np.inf, (3,))
+
+    def action(self, action):
+        return np.concatenate((action, np.zeros(4)))
+
+
+class LastObservationWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.last_cartesian_state = None
+        self.last_angular_state = None
+        self.last_gripper_state = None
+        self.last_cartesian_error = None
+        self.last_angular_error = None
+        self.last_gripper_error = None
+        self.last_t_obs = None
+
+    @staticmethod
+    def _skew(v: NDArray[np.float64]) -> NDArray[np.float64]:
+        return np.array(
+            [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]],
+            dtype=np.float64,
+        )
+
+    @classmethod
+    def _rotvec_to_matrix(cls, rotvec: NDArray[np.float64]) -> NDArray[np.float64]:
+        theta = float(np.linalg.norm(rotvec))
+        if theta < 1e-12:
+            return np.eye(3, dtype=np.float64) + cls._skew(rotvec)
+
+        axis = rotvec / theta
+        k = cls._skew(axis)
+        return (
+            np.eye(3, dtype=np.float64)
+            + np.sin(theta) * k
+            + (1.0 - np.cos(theta)) * (k @ k)
+        )
+
+    @staticmethod
+    def _matrix_to_rotvec(rotation: NDArray[np.float64]) -> NDArray[np.float64]:
+        cos_theta = float(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))
+        theta = float(np.arccos(cos_theta))
+
+        if theta < 1e-7:
+            return 0.5 * np.array(
+                [
+                    rotation[2, 1] - rotation[1, 2],
+                    rotation[0, 2] - rotation[2, 0],
+                    rotation[1, 0] - rotation[0, 1],
+                ],
+                dtype=np.float64,
+            )
+
+        sin_theta = float(np.sin(theta))
+        if abs(sin_theta) > 1e-7:
+            axis = np.array(
+                [
+                    rotation[2, 1] - rotation[1, 2],
+                    rotation[0, 2] - rotation[2, 0],
+                    rotation[1, 0] - rotation[0, 1],
+                ],
+                dtype=np.float64,
+            ) / (2.0 * sin_theta)
+            return axis * theta
+
+        # Near pi, infer axis from diagonal terms for numerical stability.
+        axis = np.sqrt(np.maximum((np.diag(rotation) + 1.0) / 2.0, 0.0))
+        axis[0] = np.copysign(axis[0], rotation[2, 1] - rotation[1, 2])
+        axis[1] = np.copysign(axis[1], rotation[0, 2] - rotation[2, 0])
+        axis[2] = np.copysign(axis[2], rotation[1, 0] - rotation[0, 1])
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-12:
+            return np.array([theta, 0.0, 0.0], dtype=np.float64)
+        return (axis / axis_norm) * theta
+
+    @classmethod
+    def _relative_rotation_error(
+        cls,
+        target_rotvec: NDArray[np.float64],
+        current_rotvec: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        rotation_target = cls._rotvec_to_matrix(target_rotvec)
+        rotation_current = cls._rotvec_to_matrix(current_rotvec)
+        rotation_error = rotation_target @ rotation_current.T
+        return cls._matrix_to_rotvec(rotation_error)
+
+    @classmethod
+    def _relative_angular_velocity(
+        cls,
+        current_rotvec: NDArray[np.float64],
+        previous_rotvec: NDArray[np.float64],
+        dt: float,
+    ) -> NDArray[np.float64]:
+        if dt <= 0.0:
+            return np.zeros_like(current_rotvec)
+
+        rotation_current = cls._rotvec_to_matrix(current_rotvec)
+        rotation_previous = cls._rotvec_to_matrix(previous_rotvec)
+        delta_rotation = rotation_current @ rotation_previous.T
+        return cls._matrix_to_rotvec(delta_rotation) / dt
+
+    def reset(self, *, seed=None, options=None):
+        observation, info = self.env.reset(seed=seed, options=options)
+        current_cartesian_state = observation["observation.state.cartesian"][:3]
+        current_angular_state = observation["observation.state.cartesian"][3:].astype(
+            np.float64
+        )
+        target_angular_state = observation["observation.state.target"][3:].astype(
+            np.float64
+        )
+        observation["observation.previous.action"] = np.zeros(
+            self.env.action_space.shape or 7
+        )
+        observation["observation.previous.error.cartesian"] = np.zeros(3)
+        observation["observation.previous.error.angular"] = np.zeros(3)
+
+        observation["observation.velocity.cartesian"] = np.zeros_like(
+            current_cartesian_state
+        )
+        observation["observation.velocity.angular"] = np.zeros_like(
+            current_angular_state
+        )
+        observation["observation.error.cartesian"] = (
+            observation["observation.state.target"][:3] - current_cartesian_state
+        )
+        observation["observation.error.angular"] = self._relative_rotation_error(
+            target_angular_state, current_angular_state
+        )
+
+        self.last_cartesian_state = current_cartesian_state
+        self.last_angular_state = current_angular_state
+        self.last_cartesian_error = observation["observation.error.cartesian"]
+        self.last_angular_error = observation["observation.error.angular"]
+        self.last_t_obs = time.perf_counter()
+        return observation, info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        t_obs = time.perf_counter()
+        current_cartesian_state = observation["observation.state.cartesian"][:3]
+        current_angular_state = observation["observation.state.cartesian"][3:].astype(
+            np.float64
+        )
+        target_angular_state = observation["observation.state.target"][3:].astype(
+            np.float64
+        )
+        dt = (
+            t_obs - self.last_t_obs
+            if self.last_cartesian_state is not None and self.last_t_obs is not None
+            else 0.0
+        )
+
+        observation["observation.previous.action"] = action
+        observation["observation.previous.error.cartesian"] = self.last_cartesian_error
+        observation["observation.previous.error.angular"] = self.last_angular_error
+
+        observation["observation.velocity.cartesian"] = (
+            (current_cartesian_state - self.last_cartesian_state) / dt
+            if self.last_cartesian_state is not None and self.last_t_obs is not None
+            else np.zeros_like(current_cartesian_state)
+        )
+        observation["observation.velocity.angular"] = (
+            self._relative_angular_velocity(
+                current_angular_state,
+                self.last_angular_state,
+                dt,
+            )
+            if self.last_angular_state is not None and self.last_t_obs is not None
+            else np.zeros_like(current_angular_state)
+        )
+        observation["observation.error.cartesian"] = (
+            observation["observation.state.target"][:3] - current_cartesian_state
+        )
+        observation["observation.error.angular"] = self._relative_rotation_error(
+            target_angular_state, current_angular_state
+        )
+
+        self.last_cartesian_state = current_cartesian_state
+        self.last_angular_state = current_angular_state
+        self.last_cartesian_error = observation["observation.error.cartesian"]
+        self.last_angular_error = observation["observation.error.angular"]
+        self.last_t_obs = t_obs
+        return observation, reward, terminated, truncated, info
+
+
+# Foundationpose interface wrapper
+# on reset:
+#   reset with custom homing position, gripper open
+
+#   A)
+#   take observation,
+#   PE:
+#   pass to SAM3 for segmentation,
+#   look at average pixel color to determine which block is which => error: set rollout unusable flag -> add to step info
+#   2x:
+#       set param in fp and fpt to correct mesh
+#       get pose from fp,
+#       set orientation to prior,
+#       pass 4x to fpt
+#   compute relative transform from observed pose to demo pose for grasped block in global frame
+
+#   B) compute from stored demo
+
+#   go to demo pose with other controller config
+#   grasp block and move up
+
+#   A)
+#   PE of grasped block
+#   compute relative transform from grasped block to placed block in global frame
+
+#   B)
+#   use known demo pose of grasped block for delta xy
+
+#   switch controller back
+#   make delta xy 0
+#   move down until contact (e.g. force threshold)
+# while stepping:
+#   use estimated pose for safety box; step size as parameter
+#   apply z-force
+
+
+# crisp gym: no image cropping in ManipulatorEnv
+
+# global safety box: make wrapper instead of modifying env directly
+
+# env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+# env = CLIWrapper(env, termination_fn=lambda _obs: False)
+# env = StepLimitEnforcerWrapper(env, max_steps=150)
+
+# env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))  -> add custom cropping
+# env = DictObservationToInfoMover(env)
+# env = ObservationFormatterWrapper(
+#     env,
+#     "cuda",
+#     keys_ranges_scales=[
+#         ("observation.previous.action", (0, 2), 10.0),
+#         ("observation.previous.error.cartesian", (0, 3), 10.0),
+#         ("observation.velocity.cartesian", (0, 3), 100.0),
+#         ("observation.error.cartesian", (0, 3), 10.0),
+#         ("observation.images.wrist_camera", (0, 512), 1.0),
+#         # ('observation.images.side_camera', (0, 512), 1.0)
+#     ],
+# )
+
+# automatic termination? -> not yet

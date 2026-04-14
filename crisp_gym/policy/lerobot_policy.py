@@ -76,6 +76,7 @@ class LerobotPolicy(Policy):
             obs_raw: Observation = self.env.get_obs()
 
             obs_raw["observation.state"] = concatenate_state_features(obs_raw)
+            obs_raw["reward"] = 0.0
 
             self.parent_conn.send(obs_raw)
             action: Action = self.parent_conn.recv().squeeze(0).to("cpu").numpy()

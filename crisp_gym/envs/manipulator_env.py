@@ -333,7 +333,7 @@ class ManipulatorBaseEnv(gym.Env):
             raise ValueError(f"Unsupported gripper mode: {self.config.gripper_mode}")
 
     @override
-    def step(self, action: np.ndarray, block: bool = False) -> Tuple[dict, float, bool, bool, dict]:
+    def step(self, action: np.ndarray, block: bool = None) -> Tuple[dict, float, bool, bool, dict]:
         """Step the environment.
 
         Args:
@@ -372,8 +372,8 @@ class ManipulatorBaseEnv(gym.Env):
         if self.gripper is not None:
             self.gripper.enable_torque()
 
-        for sensor in self.sensors:
-            sensor.reset()
+        # for sensor in self.sensors:
+        #     sensor.reset()
 
         return self._get_obs(), {}
 
@@ -411,7 +411,7 @@ class ManipulatorBaseEnv(gym.Env):
             blocking (bool): If True, wait until the robot reaches the home position.
         """
         if self.config.gripper_mode != GripperMode.NONE:
-            self.gripper.open()
+            self.gripper.home()
         self.robot.home(home_config=home_config, blocking=blocking)
 
         if not blocking:
@@ -620,7 +620,7 @@ class ManipulatorCartesianEnv(ManipulatorBaseEnv):
         return obs
 
     @override
-    def step(self, action: np.ndarray, block: bool = True) -> Tuple[dict, float, bool, bool, dict]:
+    def step(self, action: np.ndarray, block: bool = None) -> Tuple[dict, float, bool, bool, dict]:
         """Step the environment with a Cartesian action.
 
         Args:
@@ -654,9 +654,13 @@ class ManipulatorCartesianEnv(ManipulatorBaseEnv):
 
         t0 = time.perf_counter()
 
+        # print(f"[ManipulatorCartesianEnv] Step with block={block}")
+        if block is None:
+            block = self.config.is_blocking
         if block:
             # FIXME: This control rate sleep is never used and if used by the user
             # unexpected behavior occurs.
+            # print(f"Blocking step for {1.0 / self.config.control_frequency:.3f} seconds")
             time.sleep(1.0 / self.config.control_frequency)
             # if self.start_time is None:
             #     self.start_time = time.time()

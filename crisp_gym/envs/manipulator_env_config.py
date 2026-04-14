@@ -95,6 +95,8 @@ class ManipulatorEnvConfig(ABC):
 
     max_episode_steps: int | None = None  # FIXME: This is not used. Remove?
 
+    is_blocking: bool = False
+
     # Observation configuration (camera and sensor observations are always included if configured)
     observations_to_include_to_state: List[str] = field(
         default_factory=lambda: [
@@ -121,7 +123,7 @@ class ManipulatorEnvConfig(ABC):
 
         if (
             self.cartesian_control_param_config is not None
-            and not self.cartesian_control_param_config.exists()
+            and not Path(self.cartesian_control_param_config).exists()
         ):
             raise FileNotFoundError(
                 f"Cartesian control param config file not found: {self.cartesian_control_param_config}"
@@ -129,7 +131,7 @@ class ManipulatorEnvConfig(ABC):
 
         if (
             self.joint_control_param_config is not None
-            and not self.joint_control_param_config.exists()
+            and not Path(self.joint_control_param_config).exists()
         ):
             raise FileNotFoundError(
                 f"Joint control param config file not found: {self.joint_control_param_config}"
