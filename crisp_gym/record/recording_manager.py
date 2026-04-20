@@ -169,6 +169,16 @@ class RecordingManager(ABC):
         """Process to write data to the dataset."""
         logger.info("Starting dataset writer process.")
         dataset = self._create_dataset()
+        # Offload PIL image writes to a worker pool. Measured (2026-04-20): inline
+        # _save_image takes ~39 ms per 640x480 RGB image. At 30 Hz (33 ms period)
+        # the writer can never keep up, the size-16 queue saturates, and the
+        # recording loop's queue.put blocks for ~30 ms per iteration, capping
+        # recording at ~22 Hz. With the async pool, save_image enqueues and
+        # returns in microseconds.
+        try:
+            dataset.start_image_writer(num_processes=4, num_threads=2)
+        except Exception as e:
+            logger.warning(f"start_image_writer unavailable, falling back to sync: {e}")
         self.dataset_ready.set()
         logger.debug(f"Dataset features: {list(self.config.features.keys())}")
 
@@ -263,6 +273,13 @@ class RecordingManager(ABC):
                         )
                 elif mtype == "SHUTDOWN":
                     logger.info("Shutting down writer process.")
+                    # If we spawned an async image writer pool, stop it cleanly
+                    # before the process exits (otherwise writer.join() hangs
+                    # on the pool's orphaned workers).
+                    try:
+                        dataset.stop_image_writer()
+                    except Exception as e:
+                        logger.warning(f"stop_image_writer raised on shutdown: {e}")
                     break
             except Exception as e:
                 logger.exception("Error occured: ", e)
