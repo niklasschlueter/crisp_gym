@@ -21,7 +21,13 @@ import time
 import numpy as np
 import rclpy
 
-from crisp_gym.record.recording_manager import RecordingManager, _materialize_shm_frames
+from crisp_gym.record.recording_manager import RecordingManager
+
+try:
+    from crisp_gym.record.recording_manager import _materialize_shm_frames
+except ImportError:
+    def _materialize_shm_frames(obs, _blocks):
+        return obs
 from crisp_gym.record.recording_manager_config import RecordingManagerConfig
 from crisp_py.camera import Camera
 from crisp_py.camera.camera_config import CameraConfig
@@ -81,6 +87,17 @@ def _parse_args():
     )
     p.add_argument("--target-width", type=int, default=1280, help="CameraConfig.resolution width")
     p.add_argument(
+        "--image-topic",
+        default="bench/camera/color/image_raw",
+        help="Base image topic (Camera appends '/compressed'). "
+        "For a real rosbag set e.g. 'camera/color/image_raw'.",
+    )
+    p.add_argument(
+        "--info-topic",
+        default="bench/camera/color/camera_info",
+        help="Camera info topic.",
+    )
+    p.add_argument(
         "--no-shm",
         action="store_true",
         help="Bypass _swap_images_for_handles to A/B against the patch",
@@ -96,14 +113,18 @@ def main():
         namespace="",
         config=CameraConfig(
             camera_name="bench",
-            camera_color_image_topic="bench/camera/color/image_raw",
-            camera_color_info_topic="bench/camera/color/camera_info",
+            camera_color_image_topic=args.image_topic,
+            camera_color_info_topic=args.info_topic,
             resolution=(args.target_height, args.target_width),
         ),
     )
     print("Waiting for publisher...", flush=True)
     cam.wait_until_ready(timeout=15.0)
-    print("Camera ready.", flush=True)
+    print(
+        f"Camera ready. CameraConfig.resolution={cam.config.resolution}  "
+        f"actual cam.current_image.shape={cam.current_image.shape}",
+        flush=True,
+    )
 
     config = RecordingManagerConfig(
         features={
@@ -161,7 +182,7 @@ def main():
 
     manager.queue.put({"type": "SHUTDOWN"})
     manager.writer.join(timeout=10.0)
-    if manager._image_ring is not None:
+    if hasattr(manager, "_image_ring") and manager._image_ring is not None:
         manager._image_ring.cleanup()
 
     n = manager._frame_count.value

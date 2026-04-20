@@ -2,14 +2,11 @@
 
 import logging
 import multiprocessing as mp
-import os
 import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from inspect import signature
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -37,75 +34,6 @@ from crisp_gym.util.lerobot_features import concatenate_state_features
 logger = logging.getLogger(__name__)
 
 _ADD_FRAME_HAS_TASK = "task" in signature(LeRobotDataset.add_frame).parameters
-
-
-@dataclass
-class _SharedFrame:
-    """Pickle-cheap handle pointing at an image stored in a SharedMemory block."""
-
-    block_name: str
-    shape: tuple
-    dtype: str
-
-
-class _SharedImageRing:
-    """Ring buffer of SharedMemory blocks for zero-copy image transfer.
-
-    Producer copies pixels into the next slot and emits a `_SharedFrame`.
-    Consumer reconstructs a numpy view from the named block and copies it out.
-    Ring size must exceed the queue depth so slots are never overwritten in flight.
-    """
-
-    def __init__(self, ring_size: int, max_image_bytes: int, name_prefix: str):
-        self.blocks = [
-            shared_memory.SharedMemory(
-                create=True, size=max_image_bytes, name=f"{name_prefix}_{i}"
-            )
-            for i in range(ring_size)
-        ]
-        self._cursor = 0
-        self._ring_size = ring_size
-
-    def claim_slot(self, arr: np.ndarray) -> _SharedFrame:
-        block = self.blocks[self._cursor]
-        assert arr.nbytes <= block.size, (
-            f"Image of {arr.nbytes} bytes exceeds slot size {block.size}; "
-            "increase max_image_bytes or shrink the image."
-        )
-        np.ndarray(arr.shape, dtype=arr.dtype, buffer=block.buf)[:] = arr
-        handle = _SharedFrame(
-            block_name=block.name, shape=tuple(arr.shape), dtype=str(arr.dtype)
-        )
-        self._cursor = (self._cursor + 1) % self._ring_size
-        return handle
-
-    def cleanup(self) -> None:
-        for block in self.blocks:
-            try:
-                block.close()
-                block.unlink()
-            except FileNotFoundError:
-                pass
-
-
-def _materialize_shm_frames(
-    obs: dict, shm_blocks: dict[str, shared_memory.SharedMemory]
-) -> dict:
-    """Replace _SharedFrame handles in `obs` with copied numpy arrays.
-
-    The caller owns `shm_blocks` so each block is opened at most once across
-    many calls. Returned arrays are copies so the producer is free to
-    overwrite the slot on its next claim.
-    """
-    out = dict(obs)
-    for k, v in obs.items():
-        if isinstance(v, _SharedFrame):
-            if v.block_name not in shm_blocks:
-                shm_blocks[v.block_name] = shared_memory.SharedMemory(name=v.block_name)
-            out[k] = np.ndarray(
-                v.shape, dtype=np.dtype(v.dtype), buffer=shm_blocks[v.block_name].buf
-            ).copy()
-    return out
 
 
 class RecordingManager(ABC):
@@ -145,8 +73,6 @@ class RecordingManager(ABC):
         self.queue = mp.JoinableQueue(self.config.queue_size)
         self.episode_count_queue = mp.Queue(1)
         self.dataset_ready = mp.Event()
-
-        self._image_ring: _SharedImageRing | None = None
 
         # Start the writer process
         self.writer = mp.Process(
@@ -246,8 +172,6 @@ class RecordingManager(ABC):
         self.dataset_ready.set()
         logger.debug(f"Dataset features: {list(self.config.features.keys())}")
 
-        shm_blocks: dict[str, shared_memory.SharedMemory] = {}
-
         while True:
             msg = self.queue.get()
             logger.debug(f"Received message: {msg['type']}")
@@ -256,7 +180,6 @@ class RecordingManager(ABC):
 
                 if mtype == "FRAME":
                     obs, action, task = msg["data"]
-                    obs = _materialize_shm_frames(obs, shm_blocks)
 
                     logger.debug(f"Received frame with action: {action} and obs: {obs.keys()}")
 
@@ -339,8 +262,6 @@ class RecordingManager(ABC):
                             exc_info=True,
                         )
                 elif mtype == "SHUTDOWN":
-                    for blk in shm_blocks.values():
-                        blk.close()
                     logger.info("Shutting down writer process.")
                     break
             except Exception as e:
@@ -350,34 +271,6 @@ class RecordingManager(ABC):
 
         self.queue.task_done()
         logger.info("Writter process finished.")
-
-    def _swap_images_for_handles(self, obs: dict) -> dict:
-        """Replace numpy image arrays in `obs` with cheap _SharedFrame handles.
-
-        Pixels are copied once into a pre-allocated SharedMemory ring slot, so
-        the queued payload becomes ~1 KB instead of multiple MB and pickling
-        cost across the multiprocessing queue drops to microseconds.
-        """
-        image_keys = [
-            k for k, v in obs.items()
-            if k.startswith("observation.images.") and isinstance(v, np.ndarray)
-        ]
-        if not image_keys:
-            return obs
-
-        if self._image_ring is None:
-            max_bytes = max(obs[k].nbytes for k in image_keys)
-            ring_size = self.config.queue_size + 4
-            self._image_ring = _SharedImageRing(
-                ring_size=ring_size,
-                max_image_bytes=max_bytes,
-                name_prefix=f"crisp_record_{os.getpid()}",
-            )
-
-        swapped = dict(obs)
-        for k in image_keys:
-            swapped[k] = self._image_ring.claim_slot(obs[k])
-        return swapped
 
     def record_episode(
         self,
@@ -418,7 +311,6 @@ class RecordingManager(ABC):
                 time.sleep(sleep_time)
                 continue
 
-            obs = self._swap_images_for_handles(obs)
             self.queue.put({"type": "FRAME", "data": (obs, action, task)})
 
             sleep_time = 1 / self.config.fps - (time.time() - frame_start)
@@ -488,10 +380,6 @@ class RecordingManager(ABC):
         self.queue.put({"type": "SHUTDOWN"})
 
         self.writer.join()
-
-        if self._image_ring is not None:
-            self._image_ring.cleanup()
-            self._image_ring = None
 
     def _set_to_wait(self) -> None:
         """Set to wait if possible."""
