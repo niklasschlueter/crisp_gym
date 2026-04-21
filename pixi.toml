@@ -4,7 +4,7 @@ authors = [
     "Maximilian Dösch <doesch.maximilian@gmail.com>",
     "Daniel San José Pro <42489409+danielsanjosepro@users.noreply.github.com>"
 ]
-channels = ["https://fast.prefix.dev/conda-forge"]
+channels = ["conda-forge"]
 name = "crisp_gym"
 platforms = ["linux-64"]
 
@@ -12,16 +12,19 @@ platforms = ["linux-64"]
 scripts = [
     "scripts/set_env.sh",
 ]
+# Keep DDS discovery scoped to localhost so the real robot on the network
+# doesn't leak into local sim/test runs. Override via task-level env for
+# real-robot recording.
+env = { ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST" }
 
 [dependencies]
-python = "3.11.*"
 compilers = "*"
 cmake = "*"
 pkg-config = "*"
 make = "*"
 ninja = "*"
 typing_inspect = ">=0.9.0,<0.10"
-libstdcxx-ng = ">=12.2.0"
+# libstdcxx-ng = ">=12.2.0"  # legacy package name; modern robostack-jazzy 3.12 builds require `libstdcxx >=14` instead. Re-enable if something breaks.
 
 
 [target.linux.dependencies]
@@ -30,8 +33,12 @@ libgl-devel = "*"
 [environments]
 dev = { features = ["dev"] }
 humble = { features = ["humble"] }
-humble-lerobot = { features = ["humble", "lerobot", "dev"] }
-lerobot = { features = ["lerobot"] }
+# humble-lerobot removed: lerobot v0.5+ needs Python 3.12, humble targets 3.11.
+# humble-lerobot = { features = ["humble", "lerobot", "dev"] }
+# Standalone lerobot env (no ROS) disabled — conda picks numpy 2.4.x which
+# crisp_py rejects; no good way to constrain numpy without pulling in the
+# jazzy feature. Re-enable with a feature-level numpy pin if needed.
+# lerobot = { features = ["lerobot"] }
 jazzy = { features = ["jazzy"] }
 jazzy-lerobot = { features = ["jazzy", "lerobot", "dev"] }
 
@@ -47,7 +54,7 @@ rerun-sdk = "=0.22.1"
 
 [feature.lerobot.pypi-dependencies]
 # === Working version (pinned) ===
-lerobot = { git = "https://github.com/huggingface/lerobot", rev = "dacd1d7f5c719c3e56d7b7154a751bef6d5bd23c", extras = ["smolvla"] }
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "v0.3.3", extras = ["smolvla"] }
 # === Newer version ===
 # lerobot = { git = "https://github.com/huggingface/lerobot", rev = "74690e3f56a90b6ea314afbfb3b801a3d842a005", extras = ["smolvla"]}
 # === Local version (path doesn't exist on this machine) ===
@@ -57,6 +64,7 @@ lerobot = { git = "https://github.com/huggingface/lerobot", rev = "dacd1d7f5c719
 channels = ["https://prefix.dev/robostack-humble"]
 
 [feature.humble.dependencies]
+python = "3.11.*"            # robostack-humble targets Python 3.11
 ros-humble-desktop = "*"
 colcon-common-extensions = "*"
 ros-humble-ros2-control = "*"
@@ -69,13 +77,21 @@ ros-humble-image-transport-plugins = "*"
 channels = ["https://prefix.dev/robostack-jazzy"]
 
 [feature.jazzy.dependencies]
+# Jazzy officially targets Python 3.12 (Ubuntu 24.04 Noble). robostack-jazzy
+# ships 3.12 builds (tag np2py312) that also unlock fastrtps 2.14.5 +
+# openssl >= 3.6.1, matching the sim env exactly.
+python = "3.12.*"
+numpy = "<=2.3"              # crisp_py constraint
 ros-jazzy-desktop = "*"
+ros-jazzy-fastrtps = ">=2.14.5"   # match sim env
 ros-jazzy-ros2-control = "*"
 ros-jazzy-ros2-controllers = "*"
 colcon-common-extensions = "*"
 rosdep = "*"
 ros-jazzy-rmw-cyclonedds-cpp = "*"
-ros-jazzy-rmw-zenoh-cpp = "*"
+# ros-jazzy-rmw-zenoh-cpp removed: pins numpy<2.0, libzenohc unresolvable on
+# robostack-jazzy. Re-add if zenoh is actually needed.
+# ros-jazzy-rmw-zenoh-cpp = "*"
 
 [pypi-dependencies]
 crisp_gym = { path = ".", editable = true }
