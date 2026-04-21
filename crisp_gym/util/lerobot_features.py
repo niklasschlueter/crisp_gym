@@ -40,9 +40,13 @@ def get_features(
         use_video (bool): Whether to include video features. Defaults to True.
         ignore_keys (list[str], optional): List of observation keys to ignore. Defaults to None.
     """
-    if not CODEBASE_VERSION.startswith("v2"):
+    # Feature spec (including the `video_info` subdict) verified against
+    # both v2.x and v3.0 LeRobotDataset — v3.0 info.json writes the same
+    # keys. Warn only for major versions we haven't verified.
+    if CODEBASE_VERSION.split(".", 1)[0] not in ("v2", "v3"):
         logger.warning(
-            "Feature generation for LeRobot has been implemented for version 2.x of LeRobotDataset. Expect unexpected behaviour for other versions."
+            f"Feature generation for LeRobot has been verified for v2.x and v3.x; "
+            f"current CODEBASE_VERSION={CODEBASE_VERSION!r} is unverified."
         )
 
     ctrl_dims: dict[ControlType, list[str]] = {

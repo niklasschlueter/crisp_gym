@@ -34,6 +34,11 @@ from crisp_gym.util.lerobot_features import concatenate_state_features
 logger = logging.getLogger(__name__)
 
 _ADD_FRAME_HAS_TASK = "task" in signature(LeRobotDataset.add_frame).parameters
+# lerobot v0.5+ moved the async image-writer config into LeRobotDataset.create(...)
+# and dropped the dataset.start_image_writer / stop_image_writer methods.
+_CREATE_HAS_WRITER_ARGS = (
+    "image_writer_processes" in signature(LeRobotDataset.create).parameters
+)
 
 
 class RecordingManager(ABC):
@@ -155,13 +160,19 @@ class RecordingManager(ABC):
                 raise FileExistsError(
                     f"The repo_id already exists. If you intended to resume the collection of data, then execute this script with the --resume flag. Otherwise remove it:\n'rm -r {str(Path(HF_LEROBOT_HOME / self.config.repo_id))}'."
                 )
-            dataset = LeRobotDataset.create(
+            create_kwargs = dict(
                 repo_id=self.config.repo_id,
                 fps=self.config.fps,
                 robot_type=self.config.robot_type,
                 features=self.config.features,
                 use_videos=True,
             )
+            if _CREATE_HAS_WRITER_ARGS:
+                # lerobot v0.5+: writer pool is started by .create(); no
+                # separate start_image_writer() call (see _writer_proc).
+                create_kwargs["image_writer_processes"] = 4
+                create_kwargs["image_writer_threads"] = 2
+            dataset = LeRobotDataset.create(**create_kwargs)
             logger.debug(f"Dataset created with meta: {dataset.meta}")
         return dataset
 
@@ -175,10 +186,12 @@ class RecordingManager(ABC):
         # recording loop's queue.put blocks for ~30 ms per iteration, capping
         # recording at ~22 Hz. With the async pool, save_image enqueues and
         # returns in microseconds.
-        try:
-            dataset.start_image_writer(num_processes=4, num_threads=2)
-        except Exception as e:
-            logger.warning(f"start_image_writer unavailable, falling back to sync: {e}")
+        if not _CREATE_HAS_WRITER_ARGS:
+            # lerobot v0.3.x: writer pool must be started post-construction.
+            try:
+                dataset.start_image_writer(num_processes=4, num_threads=2)
+            except Exception as e:
+                logger.warning(f"start_image_writer unavailable, falling back to sync: {e}")
         self.dataset_ready.set()
         logger.debug(f"Dataset features: {list(self.config.features.keys())}")
 
@@ -215,9 +228,11 @@ class RecordingManager(ABC):
                     )
 
                     logger.debug(f"Constructed frame with keys: {frame.keys()}")
-                    if _ADD_FRAME_HAS_TASK:  # For lerobot versions with explicit `task` parameter (>= v3.0)
+                    if _ADD_FRAME_HAS_TASK:
+                        # lerobot v0.3.x (LeRobotDataset v2.x): explicit task kwarg
                         dataset.add_frame(frame, task=task)
-                    else:  # For older lerobot versions without `task` parameter (< v3.0)
+                    else:
+                        # lerobot v0.5+ (LeRobotDataset v3.x): task embedded in frame dict
                         frame["task"] = task
                         dataset.add_frame(frame)
 
@@ -264,7 +279,7 @@ class RecordingManager(ABC):
                         "Pushing dataset to Hugging Face Hub...",
                     )
                     try:
-                        dataset.push_to_hub(repo_id=self.config.repo_id, private=True)
+                        dataset.push_to_hub(private=True)
                         logger.info("Dataset pushed to Hugging Face Hub successfully.")
                     except Exception as e:
                         logger.error(
@@ -273,13 +288,15 @@ class RecordingManager(ABC):
                         )
                 elif mtype == "SHUTDOWN":
                     logger.info("Shutting down writer process.")
-                    # If we spawned an async image writer pool, stop it cleanly
-                    # before the process exits (otherwise writer.join() hangs
-                    # on the pool's orphaned workers).
-                    try:
-                        dataset.stop_image_writer()
-                    except Exception as e:
-                        logger.warning(f"stop_image_writer raised on shutdown: {e}")
+                    # lerobot v0.3.x: explicit stop needed to join the async
+                    # image-writer pool cleanly. v0.5+: writer pool is managed
+                    # internally by .create() and torn down on garbage collect,
+                    # so we just skip.
+                    if not _CREATE_HAS_WRITER_ARGS:
+                        try:
+                            dataset.stop_image_writer()
+                        except Exception as e:
+                            logger.warning(f"stop_image_writer raised on shutdown: {e}")
                     break
             except Exception as e:
                 logger.exception("Error occured: ", e)
