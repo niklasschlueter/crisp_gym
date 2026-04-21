@@ -262,7 +262,7 @@ class ManipulatorBaseEnv(gym.Env):
                 file_path=self.config.joint_control_param_config
             )
 
-    _REQUIRED_CONTROLLERS = ["joint_trajectory_controller", "cartesian_impedance_controller"]
+    _REQUIRED_CONTROLLERS = ["joint_trajectory_controller", "cartesian_controller"]
 
     def wait_until_ready(self):
         """Wait until the robot, gripper, cameras, and sensors are ready."""
@@ -299,15 +299,11 @@ class ManipulatorBaseEnv(gym.Env):
         while time.time() - t_start < timeout:
             controllers = self.robot.controller_switcher_client.get_controller_list()
             controller_names = [c.name for c in controllers]
-            missing = [
-                name for name in self._REQUIRED_CONTROLLERS if name not in controller_names
-            ]
+            missing = [name for name in self._REQUIRED_CONTROLLERS if name not in controller_names]
             if not missing:
                 logger.debug("All required controllers are loaded.")
                 return
-            logger.debug(
-                f"Waiting for controllers to be loaded: {missing}"
-            )
+            logger.debug(f"Waiting for controllers to be loaded: {missing}")
             time.sleep(0.5)
 
         raise TimeoutError(

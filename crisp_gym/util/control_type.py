@@ -31,8 +31,8 @@ class ControlType(Enum):
     def controller_name(self) -> str:
         """Get the controller name for the control type."""
         if self == ControlType.JOINT:
-            return "joint_impedance_controller"
+            return "joint_trajectory_controller"
         elif self == ControlType.CARTESIAN:
-            return "cartesian_impedance_controller"
+            return "cartesian_controller"
         else:
             raise ValueError(f"No controller available for controller type: {self.value}")
