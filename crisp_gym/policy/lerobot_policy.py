@@ -2,7 +2,7 @@
 
 import json
 import logging
-from multiprocessing import Pipe, Process
+import multiprocessing as mp
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Callable, Tuple
@@ -52,16 +52,23 @@ class LerobotPolicy(Policy):
             env (ManipulatorBaseEnv): The environment in which the policy will be applied.
             overrides (dict | None): Optional overrides for the policy configuration.
         """
-        self.parent_conn, self.child_conn = Pipe()
+        # Use spawn context: fork + CUDA is broken (torch refuses to re-init
+        # CUDA in a forked child once the parent has touched it). Spawn also
+        # means the worker kwargs must be picklable — so we pass a metadata
+        # dict and a sampled observation instead of the live env object
+        # (rclpy-containing objects are not picklable).
+        ctx = mp.get_context("spawn")
+        self.parent_conn, self.child_conn = ctx.Pipe()
         self.env = env
         self.overrides = overrides if overrides is not None else {}
 
-        self.inf_proc = Process(
+        self.inf_proc = ctx.Process(
             target=inference_worker,
             kwargs={
                 "conn": self.child_conn,
                 "pretrained_path": pretrained_path,
-                "env": env,
+                "env_metadata": env.get_metadata(),
+                "warmup_obs_raw": env.observation_space.sample(),
                 "overrides": self.overrides,
             },
             daemon=True,
@@ -114,7 +121,8 @@ class LerobotPolicy(Policy):
 def inference_worker(
     conn: Connection,
     pretrained_path: str,
-    env: ManipulatorBaseEnv,
+    env_metadata: dict,
+    warmup_obs_raw: dict,
     overrides: dict | None = None,
 ):  # noqa: ANN001
     """Policy inference process: loads policy on GPU, receives observations via conn, returns actions, and exits on None.
@@ -122,7 +130,11 @@ def inference_worker(
     Args:
         conn (Connection): The connection to the parent process for sending and receiving data.
         pretrained_path (str): Path to the pretrained policy model.
-        env (ManipulatorBaseEnv): The environment in which the policy will be applied.
+        env_metadata (dict): Serialized snapshot of env.get_metadata(); used to compare against
+            the dataset's stored `crisp_meta.json`. Extracted in the parent so the worker
+            doesn't need the live (rclpy/ROS-containing, unpicklable) env.
+        warmup_obs_raw (dict): A single sampled observation (env.observation_space.sample()),
+            used to warm up the policy before live inference. Must be picklable.
         overrides (dict | None): Optional overrides for the policy configuration.
     """
     setup_logging()
@@ -145,7 +157,7 @@ def inference_worker(
 
         train_config = TrainPipelineConfig.from_pretrained(pretrained_path)
 
-        _check_dataset_metadata(train_config, env, logger)
+        _check_dataset_metadata(train_config, env_metadata, logger)
 
         logger.info("[Inference] Loaded training config.")
 
@@ -176,7 +188,6 @@ def inference_worker(
         if USE_LEROBOT_PROCESSORS:
             preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy.config, pretrained_path=pretrained_path)
 
-        warmup_obs_raw = env.observation_space.sample()
         warmup_obs_raw["observation.state"] = concatenate_state_features(warmup_obs_raw)
         warmup_obs = numpy_obs_to_torch(warmup_obs_raw)
         if USE_LEROBOT_PROCESSORS:
@@ -238,7 +249,7 @@ def inference_worker(
 
 def _check_dataset_metadata(
     train_config: TrainPipelineConfig,
-    env: ManipulatorBaseEnv,
+    env_metadata: dict,
     logger: logging.Logger,
     keys_to_skip: list[str] | None = None,
 ):
@@ -246,7 +257,8 @@ def _check_dataset_metadata(
 
     Args:
         train_config (TrainPipelineConfig): The training pipeline configuration.
-        env (ManipulatorBaseEnv): The environment to compare against.
+        env_metadata (dict): Snapshot of env.get_metadata() captured in the parent
+            process (the live env is not picklable across spawn).
         logger (logging.Logger): Logger for logging information.
         keys_to_skip (list[str] | None): List of metadata keys to skip during comparison.
     """
@@ -272,7 +284,6 @@ def _check_dataset_metadata(
             logger.info(
                 "[Inference] Found crisp_meta.json in dataset, comparing environment and policy configs..."
             )
-            env_metadata = env.get_metadata()
             with open(path_to_metadata, "r") as f:
                 dataset_metadata = json.load(f)
             for key, value in dataset_metadata.items():

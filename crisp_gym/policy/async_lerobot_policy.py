@@ -1,8 +1,8 @@
 """Asynchronous Lerobot Policy Module."""
 
 import logging
+import multiprocessing as mp
 from collections import deque
-from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
 from typing import Callable, Tuple
 
@@ -13,9 +13,15 @@ from lerobot.policies.factory import get_policy_class
 from lerobot.policies.utils import populate_queues
 
 try:
-    from lerobot.utils.constants import OBS_IMAGES
+    from lerobot.policies.factory import make_pre_post_processors
+    USE_LEROBOT_PROCESSORS = True
 except ImportError:
-    from lerobot.constants import OBS_IMAGES
+    USE_LEROBOT_PROCESSORS = False
+
+try:
+    from lerobot.utils.constants import ACTION, OBS_IMAGES
+except ImportError:
+    from lerobot.constants import ACTION, OBS_IMAGES
 from typing_extensions import override
 
 from crisp_gym.envs.manipulator_env import ManipulatorBaseEnv
@@ -29,22 +35,28 @@ class AsyncLerobotPolicy(Policy):
 
     def __init__(self, pretrained_path: str, env: ManipulatorBaseEnv):
         """Initialize the policy."""
-        self.parent_conn, self.child_conn = Pipe()
+        # Derive n_obs from the policy's own config so the parent's obs-buffer
+        # pre-fill matches what the worker actually needs (the worker reads
+        # cfg.n_obs_steps at load time too — keep them in sync).
+        # Loading PreTrainedConfig is cheap (config only, no weights).
+        policy_config = PreTrainedConfig.from_pretrained(pretrained_path)
+        self.n_obs = int(policy_config.n_obs_steps)
+
+        # Spawn context: fork + CUDA is broken (torch refuses re-init after
+        # parent has touched it). See lerobot_policy.py for the same fix.
+        ctx = mp.get_context("spawn")
+        self.parent_conn, self.child_conn = ctx.Pipe()
         self.env = env
-        # ToDo: make these parameters not hardcoded
-        self.n_obs = 2
+        # ToDo: expose n_act / replan_time as constructor args.
         self.n_act = 5
         self.replan_time = 3
-        self.inpainting = False
 
-        self.inf_proc = Process(
+        self.inf_proc = ctx.Process(
             target=inference_worker,
             kwargs={
                 "conn": self.child_conn,
                 "pretrained_path": pretrained_path,
-                "env": env,
                 "steps": self.n_act,
-                "inpainting": self.inpainting,
                 "replan_time": self.replan_time,
             },
             daemon=True,
@@ -125,9 +137,7 @@ class AsyncLerobotPolicy(Policy):
 def inference_worker(  # noqa: D417
     conn: Connection,
     pretrained_path: str,
-    env: ManipulatorBaseEnv,
     steps: int | None,
-    inpainting: bool,
     replan_time: int,
 ):  # noqa: ANN001
     """Policy inference process: loads policy on GPU, receives observations via conn, returns actions, and exits on None.
@@ -135,9 +145,7 @@ def inference_worker(  # noqa: D417
     Args:
         conn (Connection): The connection to the parent process for sending and receiving data.
         pretrained_path (str): Path to the pretrained policy model.
-        env (ManipulatorBaseEnv): The environment in which the policy will be applied.
         steps (int): How many actions are executed from the prediction
-        inpainting (bool): Whether to use inpainting in the prediction of a new chunk or not
         replan_time (int): After how many steps to start predicting a new action chunk
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -161,12 +169,19 @@ def inference_worker(  # noqa: D417
             )
         policy_config.n_action_steps = int(steps)
 
-    if inpainting is True:
-        policy_config.inpainting_lengh = max(
-            0, int(policy_config.n_action_steps) - int(replan_time)
-        )
-
     policy = policy_cls.from_pretrained(pretrained_path, config=policy_config)
+
+    # The queue-priming + OBS_IMAGES-stacking in the inference loop below
+    # assumes a policy whose predict_action_chunk reads from self._queues
+    # with per-feature deques (DiffusionPolicy, SmolVLAPolicy). ACTPolicy
+    # uses a different layout (_action_queue + list-of-tensors for images)
+    # and would crash here. Fail fast with a clear message.
+    if not hasattr(policy, "_queues"):
+        raise RuntimeError(
+            f"AsyncLerobotPolicy only supports policies whose predict_action_chunk "
+            f"reads from self._queues (diffusion, smolvla). Got {policy.name}. "
+            f"Use LerobotPolicy (sync) instead, which dispatches via select_action."
+        )
 
     logging.info(
         f"[Inference] Loaded {policy.name} policy with {pretrained_path} on device {device}."
@@ -174,6 +189,16 @@ def inference_worker(  # noqa: D417
 
     policy.reset()
     policy.to(device).eval()
+
+    if USE_LEROBOT_PROCESSORS:
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=policy.config, pretrained_path=pretrained_path
+        )
+    else:
+        preprocessor = postprocessor = None
+        logging.warning(
+            "[AsyncInference] No processor chain — predictions will be un-normalised."
+        )
 
     # Read policy config to know obs/action window sizes
     cfg = policy.config
@@ -188,6 +213,9 @@ def inference_worker(  # noqa: D417
         if msg == "reset":
             logging.info("[Inference] Resetting policy")
             policy.reset()
+            if preprocessor is not None:
+                preprocessor.reset()
+                postprocessor.reset()
             continue
         if not (isinstance(msg, dict) and msg.get("type") == "OBS_SEQ"):
             logging.warning(f"[Inference] Unknown message: {type(msg)}")
@@ -197,26 +225,44 @@ def inference_worker(  # noqa: D417
         obs_seq = msg["obs_seq"]
 
         # Make the policy predict an action chunk for the current observation.
-        # Therefore we follow the implementation on the Lerobot side for select_action() which calls predict_action_chunk()
+        # v0.5 flow:
+        #   - preprocessor handles per-key normalization but does NOT stack
+        #     image_features into the combined OBS_IMAGES key — we do that
+        #     manually, same as the v0.3 pattern.
+        #   - preprocessor adds placeholder entries for `action` /
+        #     `next.reward` / etc., which we must NOT populate into
+        #     policy._queues[ACTION] (mirrors lerobot's own select_action,
+        #     which passes exclude_keys=[ACTION]).
         with torch.inference_mode():
             for i in range(n_obs):
                 last = obs_seq[i]
-
                 last["observation.state"] = concatenate_state_features(last)
                 batch = numpy_obs_to_torch(last)
-
-                # This mirrors Lerobot `select_action()` pre-processing so queues are filled correctly
-                batch_norm = policy.normalize_inputs(batch)
+                if preprocessor is not None:
+                    batch = preprocessor(batch)
+                # Stack per-camera image features into the combined OBS_IMAGES
+                # key expected by the policy's internal queue.
                 if policy.config.image_features:
-                    batch_norm = dict(batch_norm)  # shallow copy then add OBS_IMAGES stack
-                    batch_norm[OBS_IMAGES] = torch.stack(
-                        [batch_norm[k] for k in policy.config.image_features], dim=-4
+                    batch = dict(batch)  # shallow copy before mutating
+                    batch[OBS_IMAGES] = torch.stack(
+                        [batch[k] for k in policy.config.image_features], dim=-4
                     )
-                # Note: It's important that this happens after stacking the images into a single key.
-                policy._queues = populate_queues(policy._queues, batch_norm)
+                policy._queues = populate_queues(
+                    policy._queues, batch, exclude_keys=[ACTION]
+                )
 
-            # Now get a fresh chunk
-            chunk = policy.predict_action_chunk(batch_norm)
+            # Now get a fresh chunk using the last preprocessed batch.
+            # Drop non-observation placeholders the preprocessor tacks on
+            # (action / next.reward / next.done / next.truncated / info) —
+            # predict_action_chunk iterates batch keys against policy._queues
+            # and would hit the empty action queue otherwise.
+            batch_for_chunk = {
+                k: v for k, v in batch.items()
+                if k.startswith("observation.")
+            }
+            chunk = policy.predict_action_chunk(batch_for_chunk)
+            if postprocessor is not None:
+                chunk = postprocessor(chunk)
             chunk = chunk.squeeze(0).to(device="cpu").numpy()
 
         logging.debug(f"[Inference] Computed chunk with shape {tuple(chunk.shape)}")
