@@ -207,3 +207,11 @@ FastRTPS-compatible fix.
 - If either of the above isn't upstreamed, users of this repo must keep the
   editable path to `../crisp_py` in `pixi.toml` — otherwise `pixi install`
   pulls the unpatched crisp_py and the bottleneck returns silently.
+- Bump lerobot from the current pin (git rev `dacd1d7f...`, pyproject says
+  `0.2.0` but no such release exists — it's a July 2025 dev snapshot) to a
+  published release. Easiest: `v0.3.2` — drop-in, same API (`start_image_writer`
+  / `stop_image_writer` on the dataset), no source changes. For `v0.5.1` the
+  writer API moved to `dataset.writer.start_image_writer(...)` and the
+  idiomatic path is `LeRobotDataset.create(..., image_writer_processes=4,
+  image_writer_threads=2)` — requires a small refactor in
+  `recording_manager.py` + verifying other crisp_gym imports still work.
