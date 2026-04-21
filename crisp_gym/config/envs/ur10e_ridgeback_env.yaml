@@ -59,7 +59,11 @@ robot_config:
   current_pose_topic: "current_pose"
   current_joint_topic: "joint_states"
   publish_frequency: 20.0
-  # publish_target_pose: false  # needs crisp_py >= a newer version than 3.4.0
+  # Spacemouse (or other teleop node) is the authoritative publisher of
+  # /target_pose. crisp_py.Robot SUBSCRIBES to it instead of publishing —
+  # otherwise cartesian_controller's two-publisher safety check rejects
+  # everything. Robot still captures robot.target_pose for the recorder.
+  publish_target_pose: false
 
 # --- Gripper Config ---
 # Robotiq 2F-85 on the Ridgeback. Binary open/closed via GripperCommand action.
@@ -69,7 +73,7 @@ gripper_config:
   command_topic: "/gripper/gripper_controller/gripper_cmd"
   joint_state_topic: "/gripper/joint_states"
   # target_state_topic: "/target_gripper_state"  # needs newer crisp_py
-  use_gripper_command_action: false   # bag-test: no real action server. Real robot uses true.
+  use_gripper_command_action: true    # sim + real robot have a live GripperActionController. Set to false for bag-test (no action server).
   index: 0
   max_delta: 1.0
 
