@@ -75,8 +75,9 @@ def main():
             f"{ds.meta.total_episodes} episode(s))"
         )
 
-    lo = ds.episode_data_index["from"][args.episode_index].item()
-    hi = ds.episode_data_index["to"][args.episode_index].item()
+    ep = ds.meta.episodes[args.episode_index]
+    lo = int(ep["dataset_from_index"])
+    hi = int(ep["dataset_to_index"])
     fps = args.fps or ds.meta.fps
     period = 1.0 / fps
     n = hi - lo
