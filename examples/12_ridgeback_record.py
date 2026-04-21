@@ -210,18 +210,23 @@ def main():
             frame_count[0] += 1
             return original_data_fn()
 
+        # Captured inside the auto-drive thread so `elapsed` measures only
+        # the active recording window, excluding env settle + final homing.
+        record_window = {"start": None, "end": None}
+
         def _auto_drive():
             time.sleep(2.0)  # let env settle + first messages arrive
             logger.info("[auto] starting recording")
+            record_window["start"] = time.time()
             recording_manager.state = "recording"
             time.sleep(args.auto_duration)
+            record_window["end"] = time.time()
             logger.info("[auto] stopping recording")
             recording_manager.state = "to_be_deleted"
             time.sleep(0.5)
             recording_manager.state = "exit"
 
         threading.Thread(target=_auto_drive, daemon=True).start()
-        _t_record_start = time.time()
 
     try:
         with recording_manager:
@@ -241,14 +246,19 @@ def main():
             env.home()
 
         if args.auto_duration is not None:
-            elapsed = time.time() - _t_record_start
+            t_start = record_window["start"]
+            t_end = record_window["end"]
             n = frame_count[0]
             print()
             print("=" * 56)
             print(" Auto-mode result")
             print("=" * 56)
             print(f" target rate:  {args.fps} Hz")
-            print(f" actual rate:  {n / elapsed:.2f} Hz   ({n} frames / {elapsed:.2f}s)")
+            if t_start is not None and t_end is not None:
+                elapsed = t_end - t_start
+                print(f" actual rate:  {n / elapsed:.2f} Hz   ({n} frames / {elapsed:.2f}s)")
+            else:
+                print(f" actual rate:  n/a (auto-drive did not complete; {n} frames captured)")
             print("=" * 56)
 
     except Exception:
