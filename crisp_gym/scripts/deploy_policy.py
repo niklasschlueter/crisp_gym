@@ -187,6 +187,15 @@ def main():
         ctrl_type = "cartesian" if not args.joint_control else "joint"
         env = make_env(args.env_config, control_type=ctrl_type, namespace=args.env_namespace)
 
+        # Wait for env subscribers BEFORE make_policy() spawns a CUDA-bound
+        # child process. The spawn transition briefly contends with the env's
+        # daemon-thread executors on localhost DDS; env.reset() below calls
+        # initialize() → wait_until_ready() with a 3 s per-component timeout
+        # that reliably trips during the post-spawn settle window. Calling
+        # it here populates camera._current_image etc. so later is_ready()
+        # returns immediately.
+        env.wait_until_ready()
+
         # %% Prepare the dataset
         features = get_features(env)
 
