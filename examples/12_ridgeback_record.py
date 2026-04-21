@@ -195,7 +195,7 @@ def main():
 
         def on_end():
             env.robot.reset_targets()
-            env.home(blocking=False)
+            env.home(blocking=True)
             env.gripper.open()
 
     # Optional auto-driver: replaces keyboard interaction with a fixed-duration

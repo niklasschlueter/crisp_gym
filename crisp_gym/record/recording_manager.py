@@ -316,6 +316,9 @@ class RecordingManager(ABC):
 
         logger.info("Started recording episode.")
 
+        episode_start = time.time()
+        frame_count = 0
+
         while self.state == "recording":
             frame_start = time.time()
 
@@ -329,6 +332,7 @@ class RecordingManager(ABC):
                 continue
 
             self.queue.put({"type": "FRAME", "data": (obs, action, task)})
+            frame_count += 1
 
             sleep_time = 1 / self.config.fps - (time.time() - frame_start)
             if sleep_time > 0:
@@ -341,6 +345,14 @@ class RecordingManager(ABC):
             logger.debug(f"Finished sleeping for {sleep_time:.3f} seconds.")
 
         logger.debug("Finished recording...")
+
+        episode_duration = time.time() - episode_start
+        if frame_count > 0 and episode_duration > 0:
+            logger.info(
+                f"Episode: {frame_count} frames in {episode_duration:.2f}s "
+                f"→ {frame_count / episode_duration:.2f} Hz "
+                f"(target {self.config.fps} Hz)"
+            )
 
         if on_end:
             on_end()
