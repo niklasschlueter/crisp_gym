@@ -207,11 +207,80 @@ FastRTPS-compatible fix.
 - If either of the above isn't upstreamed, users of this repo must keep the
   editable path to `../crisp_py` in `pixi.toml` — otherwise `pixi install`
   pulls the unpatched crisp_py and the bottleneck returns silently.
-- Bump lerobot from the current pin (git rev `dacd1d7f...`, pyproject says
-  `0.2.0` but no such release exists — it's a July 2025 dev snapshot) to a
-  published release. Easiest: `v0.3.2` — drop-in, same API (`start_image_writer`
-  / `stop_image_writer` on the dataset), no source changes. For `v0.5.1` the
-  writer API moved to `dataset.writer.start_image_writer(...)` and the
-  idiomatic path is `LeRobotDataset.create(..., image_writer_processes=4,
-  image_writer_threads=2)` — requires a small refactor in
-  `recording_manager.py` + verifying other crisp_gym imports still work.
+
+## Lessons learned — lerobot v0.5.1 migration (April 2026)
+
+Pipeline migrated from v0.3.3 → v0.5.1 and validated end-to-end
+(record → replay → train diffusion → sync deploy → async deploy) on
+`feature/sys-id`. Hard-won gotchas not obvious from reading current
+code:
+
+### Dataset API
+- `LeRobotDataset.add_frame(frame, task=...)` → in v0.5 `task` moves
+  into the frame dict: `frame["task"] = ...; ds.add_frame(frame)`.
+  Runtime `signature()` check (`_ADD_FRAME_HAS_TASK` in
+  `recording_manager.py`) keeps it back-compat; same for
+  `_CREATE_HAS_WRITER_ARGS`.
+- `ds.push_to_hub(repo_id=..., private=True)` → drop `repo_id`, the
+  dataset already knows it. Just `push_to_hub(private=True)`.
+- `CODEBASE_VERSION` is now `v3.0`. The `video_info` subdict we emit
+  is unchanged between v2.x and v3.0 (verified against a freshly-
+  written v0.5 dataset). Guard in `lerobot_features.py` widened to
+  `("v2", "v3")`.
+
+### Policy inference (sync + async)
+- **CUDA + `fork` is broken.** `torch` refuses to re-init CUDA in a
+  forked child once the parent has touched it. All policy workers
+  use `mp.get_context("spawn")` (`lerobot_policy.py`,
+  `async_lerobot_policy.py`). Consequence: worker kwargs must be
+  picklable — pass `env.get_metadata()` + a sampled obs, never the
+  live env (rclpy-containing).
+- **DDS warm-up vs spawn race.** `deploy_policy.py` calls
+  `env.wait_until_ready()` **before** `make_policy()`. The spawn
+  transition briefly contends with env daemon-thread executors on
+  localhost DDS; the 3 s per-component `is_ready()` timeout tripped
+  reliably if policy was made first. Order matters.
+- Any script spawning a CUDA child must be runnable under spawn
+  (`if __name__ == "__main__":` guard).
+
+### AsyncLerobotPolicy specifics
+- Only works for policies exposing `self._queues` (DiffusionPolicy,
+  SmolVLAPolicy). ACTPolicy uses `_action_queue` + list-of-tensor
+  images and will raise. Guard in `async_lerobot_policy.py` fails
+  fast with a clear message; use sync `lerobot_policy` for ACT.
+- **Queue priming must `exclude_keys=[ACTION]`**. v0.5 preprocessor
+  adds placeholder entries (`action`, `next.reward`, `next.done`,
+  `next.truncated`, `info`) to the batch. Feeding these into
+  `populate_queues` puts `None` into the action queue and
+  `predict_action_chunk` crashes with `expected Tensor ... got
+  NoneType`. Mirror of lerobot's own `select_action` call.
+- Filter the batch to `observation.*` keys before
+  `predict_action_chunk` — it iterates batch keys against
+  `policy._queues` and hits the empty action queue otherwise.
+- **OBS_IMAGES must be stacked manually.** Preprocessor does not
+  auto-stack `image_features` into the combined `OBS_IMAGES` tensor
+  that DiffusionPolicy's queue expects — reinstated the
+  `torch.stack(..., dim=-4)` step (same pattern as v0.3).
+- `n_obs_steps` is read from the policy's own config (not hardcoded
+  to 2) so the parent's obs-buffer pre-fill matches what the worker
+  reads internally.
+
+### Version constraints
+- `lerobot v0.5.1` requires `python>=3.12`, which broke the humble
+  environment (py3.11). `humble-lerobot` is commented out in
+  `pixi.toml`; jazzy path works. Re-enabling needs a feature split
+  (`lerobot-v3` for humble, `lerobot-v5` for jazzy).
+- `torch>=2.9` cascades `torchcodec>=0.8.1` (first with ffmpeg 8
+  support), removing the need for a separate ffmpeg pin.
+- `rerun-sdk>=0.24,<0.27`, `packaging<26`, `numpy<2.3` — all driven
+  by v0.5.1 deps.
+- When pixi resolver sticks on old constraints: `rm pixi.lock` and
+  re-solve.
+
+### Deploy ordering (deploy_policy.py canonical sequence)
+1. `make_env(...)` — constructs env, starts ROS executors.
+2. `env.wait_until_ready()` — populates camera / joint buffers.
+3. `make_policy(...)` — spawns CUDA worker.
+4. `env.reset(); env.home()` — only now safe to command the robot.
+
+Out-of-order gives DDS-readiness timeouts or warm-up crashes.
