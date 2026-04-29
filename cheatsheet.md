@@ -32,7 +32,10 @@ pixi run -e jazzy-lerobot python examples/13_replay_episode.py \
 ## visualize dataset
 
 ```bash
-pixi run -e jazzy-lerobot lerobot-dataset-visualize --repo-id my_dataset
+pixi run -e jazzy-lerobot python -m lerobot.scripts.lerobot_dataset_viz \
+    --repo-id my_dataset \
+    --root ~/.cache/huggingface/lerobot/my_dataset \
+    --episode-index 0
 ```
 
 datasets live at `~/.cache/huggingface/lerobot/<repo-id>/`.
